@@ -38,6 +38,7 @@ import com.anilili.data.model.Viewer
 import com.anilili.data.model.ViewerStatistics
 import com.anilili.data.library.WatchedTitles
 import com.anilili.data.model.WatchedFilter
+import com.anilili.data.provider.registry.UnifiedProviderRegistry
 import com.anilili.data.remote.AniListClient
 import com.anilili.data.remote.AniZipClient
 import com.anilili.data.remote.AniSkipClient
@@ -124,11 +125,11 @@ internal fun providerAttemptOrder(
             if (name.isNotBlank() && name != DEFAULT_PREFERRED_PROVIDER && name !in this) add(name)
         }
     }
-    val available = (chosen + providerNames.sortedBy { ProviderCatalog.sortKey(it) }).distinct()
-    val preferredSource = ProviderCatalog.sourceOf(preferred)
+    val available = (chosen + providerNames.sortedBy { providerRegistry.sortKey(it) }).distinct()
+    val preferredSource = providerRegistry.getSourceType(preferred)
     val rest = available.filterNot { it in chosen }
-    val sameSource = rest.filter { ProviderCatalog.sourceOf(it) == preferredSource }
-    val otherSource = rest.filter { ProviderCatalog.sourceOf(it) != preferredSource }
+    val sameSource = rest.filter { providerRegistry.getSourceType(it) == preferredSource }
+    val otherSource = rest.filter { providerRegistry.getSourceType(it) != preferredSource }
 
     return buildList {
         addAll(chosen)
@@ -769,6 +770,7 @@ class MiruroRepository(
     private val cache: AppCache,
     private val localCatalog: LocalCatalog,
     private val aniZip: AniZipClient,
+    private val providerRegistry: UnifiedProviderRegistry,
 ) {
     /** User preference: keep hentai out of every browsing surface. */
     private val hideAdult: Boolean get() = SettingsStore.hideAdultContent.value
@@ -2274,9 +2276,9 @@ class MiruroRepository(
         // was never going to answer. A server the viewer switched off drops out here rather than
         // from the result: every member of this list costs a semaphore lane and a round trip, and
         // not spending them is most of the point of turning one off.
-        val asked = ProviderCatalog.providersForCountry(
-            ProviderCatalog.enabledProviders(
-                ProviderCatalog.anivexaProvidersFor(hideAdult),
+        val asked = providerRegistry.providersForCountry(
+            providerRegistry.enabledProviders(
+                providerRegistry.anivexaProvidersFor(hideAdult),
                 SettingsStore.disabledProviders.value,
             ),
             seed?.countryOfOrigin,
@@ -2297,7 +2299,7 @@ class MiruroRepository(
             // Switching a server off in Settings narrows the same list, so it needs no
             // invalidation of its own: the catalogue without it is a different entry from the
             // catalogue with it, and switching it back on lands on the entry it already had.
-            key = "episodes:v5:anivexa:${ProviderCatalog.fingerprint(asked)}:$anilistId",
+            key = "episodes:v5:anivexa:${providerRegistry.fingerprint(asked)}:$anilistId",
             serializer = EpisodesResult.serializer(),
             ttlMs = episodesTtlMs(),
             forceRefresh = force,
@@ -2351,10 +2353,10 @@ class MiruroRepository(
         onPartial: ((EpisodesResult) -> Unit)? = null,
     ): EpisodesResult {
         if (isOnePaceMediaId(anilistId)) return anivexa.onePaceEpisodes()
-        val providers = ProviderCatalog.enabledProviders(
+        val providers = providerRegistry.enabledProviders(
             (
-                ProviderCatalog.fastAnivexaProviders +
-                    extraProviders.filter { it in ProviderCatalog.anivexaProviders }
+                providerRegistry.fastAnivexaProviders +
+                    extraProviders.filter { it in providerRegistry.anivexaProvidersFor(false) }
                 ).distinct(),
             SettingsStore.disabledProviders.value,
         )
@@ -2375,7 +2377,7 @@ class MiruroRepository(
                 onProvider = onPartial?.let { deliver ->
                     { row ->
                         answered[row.name] = row
-                        deliver(EpisodesResult(answered.values.sortedBy { ProviderCatalog.sortKey(it.name) }))
+                        deliver(EpisodesResult(answered.values.sortedBy { providerRegistry.sortKey(it.name) }))
                     }
                 },
             ).also {
@@ -2404,7 +2406,7 @@ class MiruroRepository(
         val replaced = b.providerNames.toSet()
         return EpisodesResult(
             (a.providers.filterNot { it.name in replaced } + b.providers)
-                .sortedBy { ProviderCatalog.sortKey(it.name) },
+                .sortedBy { providerRegistry.sortKey(it.name) },
         )
     }
 
@@ -2414,10 +2416,12 @@ class MiruroRepository(
         variant: SourceVariant,
         anilistId: Int,
         allowInteractiveChallenges: Boolean = true,
-    ): SourcesResult = when (ProviderCatalog.sourceOf(provider)) {
-        ProviderCatalog.Source.ANIVEXA ->
+    ): SourcesResult = when (providerRegistry.getSourceType(provider)) {
+        UnifiedSourceType.ANIVEXA, UnifiedSourceType.REMOTE_JSON -> 
             anivexa.getSources(pipeId, animeInfo(anilistId), allowInteractiveChallenges)
-        ProviderCatalog.Source.MIRURO -> pipe.getSources(pipeId, provider, variant, anilistId)
+        UnifiedSourceType.MIRURO, UnifiedSourceType.REMOTE_HTML ->
+            pipe.getSources(pipeId, provider, variant, anilistId)
+        else -> throw IllegalArgumentException("Unknown provider source type for $provider")
     }
 
     data class ResolvedSources(
@@ -2471,9 +2475,9 @@ class MiruroRepository(
         }
         fun attemptTimeoutFor(provider: String): Long = when {
             provider == interactiveProvider -> INTERACTIVE_SOURCE_TIMEOUT_MS
-            ProviderCatalog.sourceOf(provider) == ProviderCatalog.Source.MIRURO ->
+            providerRegistry.getSourceType(provider) == UnifiedSourceType.MIRURO ->
                 PipeBridge.sourceAttemptTimeoutMs()
-            ProviderCatalog.requiresResolverWebView(provider) -> WEBVIEW_SOURCE_ATTEMPT_TIMEOUT_MS
+            providerRegistry.requiresResolverWebView(provider) -> WEBVIEW_SOURCE_ATTEMPT_TIMEOUT_MS
             else -> PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS
         }
         // Debug-only measurement mode. A benchmark cannot use the normal path: the route's
@@ -2502,7 +2506,7 @@ class MiruroRepository(
                     // A hand-made ranking in Settings still leads, then the catalogue's default
                     // priority; only what both leave unranked is ordered by measurement.
                     val ranked = userRanked.filter { it in names }
-                    val defaults = ProviderCatalog.defaultPriority.filter { it in names && it !in ranked }
+                    val defaults = providerRegistry.defaultPriority().filter { it in names && it !in ranked }
                     ranked + defaults + ProviderSpeed.rank(names.filterNot { it in ranked || it in defaults })
                 }
             }
@@ -2518,10 +2522,10 @@ class MiruroRepository(
             // A multi-audio server lists the episode only under sub even though the file carries
             // an English track too. Searching it under sub keeps it in the running for a dub
             // request instead of silently handing the viewer over to a different server.
-            val lookup = ProviderCatalog.dubCapableCategory(name, category)
+            val lookup = providerRegistry.dubCapableCategory(name, category)
             val episode = provider.episodes(lookup).firstOrNull { it.number == number }
                 ?: return@flatMap emptyList()
-            val variants = ProviderCatalog.sourceVariants(name, category)
+            val variants = providerRegistry.sourceVariants(name, category)
             val orderedVariants = if (name == preferred && sourceVariant in variants) {
                 listOf(sourceVariant) + variants.filterNot { it == sourceVariant }
             } else {
@@ -2536,7 +2540,7 @@ class MiruroRepository(
             // untouched, and a success on a published variant returns before this is ever reached.
             val withLastResort = if (name.equals(preferred, ignoreCase = true)) {
                 orderedVariants +
-                    listOfNotNull(ProviderCatalog.unpublishedSubtitleVariant(name, category))
+                    listOfNotNull(providerRegistry.unpublishedSubtitleVariant(name, category))
             } else {
                 orderedVariants
             }
@@ -2676,7 +2680,7 @@ class MiruroRepository(
                 maxAttempts = maxAttempts,
                 hedgeDelayMs = AUTO_RACE_HEDGE_MS,
                 attemptTimeoutMsFor = ::attemptTimeoutFor,
-                isExclusive = { it in ProviderCatalog.webViewResolverProviders },
+                isExclusive = { it in providerRegistry.webViewResolverProviders },
                 onAttempt = onAttempt,
                 onSourceFailure = onSourceFailure,
                 onSourceTimeout = onSourceTimeout,
@@ -2800,11 +2804,11 @@ class MiruroRepository(
         // narrow set, deliberately, rather than `requiresResolverWebView`: that also answers true
         // for every Miruro provider, which is most of the catalogue and the bulk of what preheating
         // is for.
-        if (preferred.lowercase() in ProviderCatalog.webViewResolverProviders) return
+        if (preferred.lowercase() in providerRegistry.webViewResolverProviders) return
         val provider = episodes.provider(preferred) ?: return
-        val lookup = ProviderCatalog.dubCapableCategory(preferred, category)
+        val lookup = providerRegistry.dubCapableCategory(preferred, category)
         val episode = provider.episodes(lookup).firstOrNull { it.number == number } ?: return
-        val variant = ProviderCatalog.sourceVariants(preferred, category).let { variants ->
+        val variant = providerRegistry.sourceVariants(preferred, category).let { variants ->
             sourceVariant.takeIf { it in variants } ?: variants.firstOrNull()
         } ?: return
         val key = PreheatKey(anilistId, number, preferred, variant)

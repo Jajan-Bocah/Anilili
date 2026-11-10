@@ -101,6 +101,7 @@ internal fun settingsSearchEntries(isTv: Boolean): List<SettingsSearchEntry> = b
             "Server priority" to listOf("server", "source", "provider", "order", "priority"),
             "Preferred server languages" to
                 listOf("server", "source", "language", "filter", "tag", "english", "hindi"),
+            "Custom sources" to listOf("server", "source", "provider", "custom", "config", "json", "remote", "add", "manage"),
             // Nobody with a blocked source goes looking for "DNS over HTTPS" — they search for
             // what happened to them, which is their ISP blocking something.
             "DNS over HTTPS" to listOf(

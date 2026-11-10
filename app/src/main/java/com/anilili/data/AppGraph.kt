@@ -4,6 +4,8 @@ import android.app.ActivityManager
 import android.content.Context
 import com.anilili.BuildConfig
 import com.anilili.data.cache.AppCache
+import com.anilili.data.provider.remote.config.RemoteProviderManager
+import com.anilili.data.provider.registry.UnifiedProviderRegistry
 import com.anilili.data.remote.AniListClient
 import com.anilili.data.remote.AniZipClient
 import com.anilili.data.remote.AniSkipClient
@@ -53,6 +55,14 @@ object AppGraph {
     lateinit var metadataCache: AppCache
         private set
     lateinit var konoha: KonohaClient
+        private set
+
+    /** Remote provider config manager for custom sources. */
+    lateinit var remoteProviderManager: RemoteProviderManager
+        private set
+
+    /** Unified registry merging built-in and remote providers. */
+    lateinit var providerRegistry: UnifiedProviderRegistry
         private set
 
     /**
@@ -129,6 +139,15 @@ object AppGraph {
         val konoha = KonohaClient(context, httpClient, json, cache).also { this.konoha = it }
         DubIndex.refresh(context, konoha)
         com.anilili.data.recs.Recommendations.attach(context, httpClient, konoha)
+
+        remoteProviderManager = RemoteProviderManager(context, json).also { it.init() }
+
+        providerRegistry = UnifiedProviderRegistry(
+            remoteConfigStore = remoteProviderManager.configStore,
+            okHttpClient = httpClient,
+            json = json,
+        )
+
         repository = MiruroRepository(
             tmdb = TmdbClient(httpClient, json, cache, BuildConfig.TMDB_READ_TOKEN),
             aniList = aniList,
@@ -141,6 +160,7 @@ object AppGraph {
             cache = cache,
             localCatalog = LocalCatalog(context, json),
             aniZip = AniZipClient(httpClient, json, cache),
+            providerRegistry = providerRegistry,
         )
     }
 }

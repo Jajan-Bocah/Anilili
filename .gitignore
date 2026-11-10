@@ -48,3 +48,10 @@ showcase/mobile/*
 !showcase/tv/
 showcase/tv/*
 !showcase/tv/*.webp
+
+# Local caches & AI/developer tools
+.cache/
+.temp/
+.tmp/
+.codegraph/
+.claude/

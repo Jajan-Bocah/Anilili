@@ -280,6 +280,7 @@ private enum class SettingsPicker {
     SERVER_PRIORITY,
     SOURCE_LANGUAGES,
     DOH_PROVIDER,
+    CUSTOM_SOURCES,
     SUBTITLE_LANGUAGE,
     SECONDARY_SUBTITLE_LANGUAGE,
     SUBTITLE_SEARCH_LANGUAGE,
@@ -1659,6 +1660,10 @@ fun SettingsScreen(
             onDismiss = closePicker,
         )
 
+        SettingsPicker.CUSTOM_SOURCES -> CustomSourcesDialog(
+            onDismiss = closePicker,
+        )
+
         SettingsPicker.POSTER_ELEMENTS -> PosterElementsPicker(
             hidden = hiddenPosterElements,
             onChange = SettingsStore::setHiddenPosterElements,
@@ -2439,6 +2444,14 @@ fun SettingsScreen(
                         description = "Limits the language tags and filters in the server picker",
                         value = preferredSourceLanguages.summary(),
                         onClick = { openPicker = SettingsPicker.SOURCE_LANGUAGES },
+                    )
+                }
+                item(key = "Custom sources") {
+                    MidnightSettingRow(
+                        title = "Custom sources",
+                        description = "Add and manage remote provider configs",
+                        value = customSourcesSummary(),
+                        onClick = { openPicker = SettingsPicker.CUSTOM_SOURCES },
                     )
                 }
                 item(key = "DNS over HTTPS") {
@@ -3591,6 +3604,15 @@ private fun enabledServersSummary(disabled: Set<String>, hideAdult: Boolean): St
     return if (enabled == servers.size) "All ${servers.size}" else "$enabled of ${servers.size}"
 }
 
+private fun customSourcesSummary(): String {
+    val remoteProviderManager = com.anilili.data.AppGraph.remoteProviderManager
+    val hasConfig = remoteProviderManager.configStore.hasConfig()
+    val config = remoteProviderManager.configStore.getCurrentConfig()
+    if (!hasConfig || config == null) return "None"
+    val providerCount = config.config.providers.size
+    return "$providerCount providers"
+}
+
 @Composable
 private fun OpenSubtitlesAccountDialog(
     loggedIn: Boolean,
@@ -4147,6 +4169,242 @@ private class SettingsScreenState {
     val externalPlayerOptions = mutableStateOf<List<ExternalPlayerTarget>?>(null)
     val openPicker = mutableStateOf<SettingsPicker?>(null)
     val searchPaneVisible = mutableStateOf(false)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CustomSourcesDialog(onDismiss: () -> Unit) {
+    val remoteProviderManager = com.anilili.data.AppGraph.remoteProviderManager
+    val scope = rememberCoroutineScope()
+
+    var configUrl by remember { mutableStateOf("") }
+    var isAdding by remember { mutableStateOf(false) }
+    var addError by remember { mutableStateOf<String?>(null) }
+    var testingSource by remember { mutableStateOf<String?>(null) }
+    var testResult by remember { mutableStateOf<String?>(null) }
+
+    val currentConfig = remoteProviderManager.configStore.getCurrentConfig()
+    val hasConfig = currentConfig != null
+    val providerCount = currentConfig?.config?.providers?.size ?: 0
+    val configMetadata = currentConfig?.config?.metadata
+    val configUrlDisplay = currentConfig?.originalUrl ?: ""
+
+    MidnightModal(onDismiss = onDismiss) {
+        MidnightModalTitle(
+            kicker = "Servers",
+            title = "Custom sources",
+            body = "Add a remote provider configuration from a JSON URL. The config defines how to fetch episodes, servers, and streams from custom sources.",
+        )
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (!hasConfig) {
+                // Add source form
+                Text(
+                    text = "No custom source configured",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                androidx.compose.material3.OutlinedTextField(
+                    value = configUrl,
+                    onValueChange = { configUrl = it },
+                    label = { Text("Config URL (HTTPS)") },
+                    placeholder = { Text("https://example.com/provider-config.json") },
+                    modifier = Modifier.fillMaxWidth(),
+                    isError = addError != null,
+                    supportingText = { if (addError != null) Text(addError!!) },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.ui.text.input.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri),
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    androidx.compose.material3.TextButton(onClick = { onDismiss() }) {
+                        Text("Cancel")
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    androidx.compose.material3.FilledButton(
+                        onClick = {
+                            addError = null
+                            if (!configUrl.startsWith("https://")) {
+                                addError = "URL must use HTTPS"
+                                return@FilledButton
+                            }
+                            isAdding = true
+                            scope.launch {
+                                try {
+                                    val result = remoteProviderManager.addCustomSource(configUrl).await()
+                                    if (result.success) {
+                                        configUrl = ""
+                                    } else {
+                                        addError = result.error ?: "Failed to add source"
+                                    }
+                                } catch (e: Exception) {
+                                    addError = "Error: ${e.message}"
+                                } finally {
+                                    isAdding = false
+                                }
+                            }
+                        },
+                        enabled = !isAdding && configUrl.isNotBlank(),
+                    ) {
+                        if (isAdding) {
+                            androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Adding...")
+                        } else {
+                            Text("Add source")
+                        }
+                    }
+                }
+            } else {
+                // Show current config info
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = "Current config",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("URL: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(configUrlDisplay, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, overflow = TextOverflow.Ellipsis)
+                    }
+
+                    if (configMetadata != null) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("Name: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(configMetadata.name, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("Version: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(configMetadata.version, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("Providers: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("$providerCount", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                        }
+
+                        if (configMetadata.description.isNotBlank()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text("Description: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(configMetadata.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+
+                    // Actions
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        // Test source button
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            androidx.compose.material3.OutlinedButton(
+                                onClick = {
+                                    testingSource = "current"
+                                    testResult = null
+                                    scope.launch {
+                                        try {
+                                            val result = remoteProviderManager.fetcher.manualUpdate(configUrlDisplay).await()
+                                            testResult = if (result.success) "Test passed: ${result.message}" else "Test failed: ${result.error}"
+                                        } catch (e: Exception) {
+                                            testResult = "Test error: ${e.message}"
+                                        } finally {
+                                            testingSource = null
+                                        }
+                                    }
+                                },
+                                enabled = testingSource == null,
+                            ) {
+                                if (testingSource != null) {
+                                    androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Testing...")
+                                } else {
+                                    Text("Test source")
+                                }
+                            }
+                            testResult?.let { result ->
+                                Text(
+                                    text = result,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (result.startsWith("Test passed")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+
+                        // Update button
+                        androidx.compose.material3.OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    val result = remoteProviderManager.fetcher.manualUpdate(configUrlDisplay).await()
+                                    // Result handled by UI refresh
+                                }
+                            },
+                        ) {
+                            Text("Check for updates")
+                        }
+
+                        // Remove button
+                        androidx.compose.material3.OutlinedButton(
+                            onClick = {
+                                MidnightConfirmDialog(
+                                    title = "Remove custom source?",
+                                    body = "This will remove the custom source configuration and restore the last known good config if available.",
+                                    confirmText = "Remove",
+                                    onConfirm = {
+                                        scope.launch {
+                                            val result = remoteProviderManager.removeCustomSource().await()
+                                            // Result handled by UI refresh
+                                        }
+                                    },
+                                    onDismiss = {},
+                                )
+                            },
+                            colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error,
+                                outlinedBorder = androidx.compose.ui.graphics.BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                            ),
+                        ) {
+                            Text("Remove custom source", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 private fun overscanLabel(percent: Int): String = if (percent == 0) "Off" else "$percent% each side"
