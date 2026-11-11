@@ -1,0 +1,117 @@
+
+# ==========================================
+# Anilili Provider JSON Generator
+# Vite + React + Cloudflare Workers
+# ==========================================
+
+# Dependencies
+node_modules/
+.pnp.*
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# Build outputs
+dist/
+build/
+out/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# Cloudflare Workers / Wrangler
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.wrangler-state/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Temporary files and caches
+.cache/
+.tmp/
+temp/
+tmp/
+*.tmp
+*.temp
+.eslintcache
+.parcel-cache/
+.turbo/
+
+# Local project data
+.local/
+local-data/
+workspace/
+workspaces/
+
+# Uploaded website samples
+uploads/
+samples/private/
+fixtures/private/
+captures/
+recordings/
+
+# Browser captures / HAR files
+*.har
+*.mht
+*.mhtml
+
+# Generated provider outputs
+outputs/
+generated/
+exports/
+provider.generated.json
+*.provider.generated.json
+
+# Test outputs
+playwright-report/
+test-results/
+.nyc_output/
+blob-report/
+
+# IDE / Editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.suo
+*.user
+*.swp
+*.swo
+*~
+
+# Operating system
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Local secrets / credentials
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Local caches & AI/developer tools
+.cache/
+.temp/
+.tmp/
+.codegraph/
+.claude/
