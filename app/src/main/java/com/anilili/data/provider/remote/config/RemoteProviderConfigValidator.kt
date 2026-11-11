@@ -3,7 +3,7 @@ package com.anilili.data.provider.remote.config
 import kotlinx.serialization.json.Json
 import java.net.URL
 
-class RemoteProviderConfigValidator(
+open class RemoteProviderConfigValidator(
     private val currentSchemaVersion: Int = 1,
     private val minSupportedSchemaVersion: Int = 1,
     private val maxSupportedSchemaVersion: Int = 1,
@@ -140,12 +140,14 @@ class RemoteProviderConfigValidator(
             seen.add(lowerId)
         }
 
-        val systemIds = setOf("bee", "sun", "pewe", "hop", "ally", "kiwi", "moo", "bonk", "knob",
+        val systemIds = setOf(
+            "bee", "sun", "pewe", "hop", "ally", "kiwi", "moo", "bonk", "knob",
             "nun", "bun", "cog", "twin", "telli",
             "anipm", "anichan", "zoko", "animepahe", "rareanimes", "anidbapp", "animeheaven",
             "xfdm", "anikoto", "kaa", "allanime", "animekai", "reanime", "anizone", "animegg",
             "anineko", "2dhive", "animedekho", "toonhub", "uniquestream", "animekhor", "kartoons",
-            "animeav1", "rift", "hanime", "hentaihaven", "hstream", "onepace")
+            "animeav1", "rift", "hanime", "hentaihaven", "hstream", "onepace"
+        )
 
         providers.forEach { provider ->
             if (provider.id.lowercase() in systemIds) {
@@ -157,21 +159,27 @@ class RemoteProviderConfigValidator(
     private fun validateSecurity(config: RemoteProviderConfig, originalUrl: String, errors: MutableList<String>, warnings: MutableList<String>) {
         if (allowedOrigins.isNotEmpty()) {
             val urlOrigin = getOrigin(originalUrl)
-            if (urlOrigin !in allowedOrigins) {
+            val urlHost = getHost(originalUrl)
+            if (urlOrigin !in allowedOrigins && urlHost !in allowedOrigins && !allowedOrigins.any { urlHost.endsWith(".$it") }) {
                 errors.add("Config origin '$urlOrigin' is not in allowed origins list")
             }
         }
 
+        val securityConfig = config.security
+        val allowedDomains = securityConfig?.allowedDomains?.toSet() ?: emptySet()
+
         config.providers.forEach { provider ->
-            val endpointOrigin = getOrigin(provider.endpoint)
-            if (allowedOrigins.isNotEmpty() && endpointOrigin !in allowedOrigins) {
-                warnings.add("Provider '${provider.id}' endpoint origin '$endpointOrigin' not in allowed origins")
+            val endpointHost = getHost(provider.endpoint)
+            if (allowedDomains.isNotEmpty() && endpointHost !in allowedDomains && !allowedDomains.any { endpointHost.endsWith(".$it") }) {
+                warnings.add("Provider '${provider.id}' endpoint origin '$endpointHost' not in allowed origins")
             }
             if (provider.endpoint.contains("localhost", ignoreCase = true) || provider.endpoint.contains("127.0.0.1")) {
                 errors.add("Provider '${provider.id}' endpoint points to localhost; not allowed")
             }
+            // Private IP check is now done at runtime via DNS resolution in RemoteRequestPolicy
+            // String-based check here is just a warning
             if (provider.endpoint.contains("10.", ignoreCase = true) || provider.endpoint.contains("192.168.", ignoreCase = true) || provider.endpoint.contains("172.16.", ignoreCase = true)) {
-                warnings.add("Provider '${provider.id}' endpoint may point to private IP range")
+                warnings.add("Provider '${provider.id}' endpoint may point to private IP range (will be validated at runtime via DNS)")
             }
         }
     }
@@ -196,6 +204,14 @@ class RemoteProviderConfigValidator(
         }
     }
 
+    private fun getHost(url: String): String {
+        return try {
+            URL(url).host.lowercase()
+        } catch (e: Exception) {
+            "unknown"
+        }
+    }
+
     private fun getOrigin(url: String): String {
         return try {
             URL(url).let { "${it.protocol}://${it.host}:${if (it.port != -1) it.port else (if (it.protocol == "https") 443 else 80)}" }
@@ -203,8 +219,8 @@ class RemoteProviderConfigValidator(
             "unknown"
         }
     }
-}
 
-object RemoteProviderConfigValidator {
-    val DEFAULT = RemoteProviderConfigValidator()
+    companion object {
+        val DEFAULT = RemoteProviderConfigValidator()
+    }
 }

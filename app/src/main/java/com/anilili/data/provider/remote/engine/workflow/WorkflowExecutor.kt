@@ -4,17 +4,15 @@ import com.anilili.data.provider.remote.engine.security.RemoteRequestPolicy
 import com.anilili.diagnostics.DiagnosticsLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.Call
-import okhttp3.Callback
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import okhttp3.ResponseBody
-import java.io.IOException
-import java.net.HttpURLConnection
+import com.anilili.data.provider.remote.engine.security.RemoteRequestPolicy.SecurityConfig
+import java.nio.charset.StandardCharsets
 import java.net.URL
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 
 class WorkflowExecutor(
     private val okHttpClient: OkHttpClient,
@@ -119,7 +117,7 @@ class WorkflowExecutor(
         val urlWithQuery = if (query.isNotEmpty()) {
             val urlObj = URL(url)
             val queryString = query.entries.joinToString("&") { "${it.key}=${java.net.URLEncoder.encode(it.value, "UTF-8")}" }
-            "${urlObj.protocol}://${urlObj.host}${if (urlObj.port != -1) ":${urlObj.port}"}${urlObj.path}?$queryString"
+            "${urlObj.protocol}://${urlObj.host}${if (urlObj.port != -1) ":${urlObj.port}" else ""}${urlObj.path}?$queryString"
         } else {
             url
         }
@@ -133,11 +131,14 @@ class WorkflowExecutor(
                 requestBuilder.addHeader(key, value)
             }
 
+            val jsonMediaType = "application/json".toMediaType()
+            val requestBody = (body ?: "").toRequestBody(jsonMediaType)
+
             when (step.method) {
                 HttpMethod.GET -> requestBuilder.get()
-                HttpMethod.POST -> requestBuilder.post(body?.let { RequestBody.create(it.toByteArray(Charsets.UTF_8), MediaType.get("application/json")) }!!)
-                HttpMethod.PUT -> requestBuilder.put(body?.let { RequestBody.create(it.toByteArray(Charsets.UTF_8), MediaType.get("application/json")) }!!)
-                HttpMethod.PATCH -> requestBuilder.patch(body?.let { RequestBody.create(it.toByteArray(Charsets.UTF_8), MediaType.get("application/json")) }!!)
+                HttpMethod.POST -> requestBuilder.post(requestBody)
+                HttpMethod.PUT -> requestBuilder.put(requestBody)
+                HttpMethod.PATCH -> requestBuilder.patch(requestBody)
                 HttpMethod.DELETE -> requestBuilder.delete()
                 HttpMethod.HEAD -> requestBuilder.head()
                 HttpMethod.OPTIONS -> requestBuilder.method("OPTIONS", null)
@@ -145,9 +146,11 @@ class WorkflowExecutor(
 
             val request = requestBuilder.build()
 
+            val connectTimeout = requestPolicy.getConnectTimeoutMs().toLong()
+            val readTimeout = requestPolicy.getReadTimeoutMs().toLong()
             val call = okHttpClient.newBuilder()
-                .connectTimeout(requestPolicy.getConnectTimeoutMs(), TimeUnit.MILLISECONDS)
-                .readTimeout(requestPolicy.getReadTimeoutMs(), TimeUnit.MILLISECONDS)
+                .connectTimeout(connectTimeout, TimeUnit.MILLISECONDS)
+                .readTimeout(readTimeout, TimeUnit.MILLISECONDS)
                 .followRedirects(requestPolicy.isRedirectsAllowed())
                 .build()
                 .newCall(request)
@@ -253,7 +256,7 @@ class WorkflowExecutor(
             return StepResult.failure("MapStep: input is empty")
         }
 
-        try {
+        return try {
             val parsed = jsonParser.parse(input)
             val mapped = jsonParser.mapFields(parsed, step.mappings)
             StepResult.success(mapped)
@@ -275,7 +278,7 @@ class WorkflowExecutor(
                 is LanguageNormalizeOp -> normalizeLanguage(value)
                 is JoinOp -> {
                     val list = context.getList(step.input)?.joinToString(op.separator) ?: value
-                    list
+                    return StepResult.success(list)
                 }
                 is DefaultOp -> if (value.isBlank()) op.value else value
             }
@@ -368,7 +371,6 @@ class WorkflowExecutor(
     }
 }
 
-@Serializable
 data class HttpResponse(
     val statusCode: Int,
     val headers: Map<String, String>,
@@ -386,7 +388,7 @@ interface HtmlParser {
 
 interface JsonParser {
     fun parse(json: String): Any
-    fun extractByPath(json: String, path: String): Any
+    fun extractByPath(json: String, path: String): Any?
     fun mapFields(source: Any, mappings: Map<String, String>): Any
 }
 
@@ -434,15 +436,15 @@ class KotlinxJsonParser : JsonParser {
     }
 
     override fun parse(jsonStr: String): Any {
-        return json.parse(kotlinx.serialization.json.JsonElement.serializer(), jsonStr)
+        return json.parseToJsonElement(jsonStr)
     }
 
-    override fun extractByPath(jsonStr: String, path: String): Any {
+    override fun extractByPath(jsonStr: String, path: String): Any? {
         val element = parse(jsonStr) as kotlinx.serialization.json.JsonElement
         return extractByPath(element, path)
     }
 
-    private fun extractByPath(element: kotlinx.serialization.json.JsonElement, path: String): Any {
+    private fun extractByPath(element: kotlinx.serialization.json.JsonElement, path: String): Any? {
         val parts = path.split(".").filter { it.isNotBlank() }
         var current: kotlinx.serialization.json.JsonElement = element
 
@@ -470,8 +472,8 @@ class KotlinxJsonParser : JsonParser {
     override fun mapFields(source: Any, mappings: Map<String, String>): Any {
         val obj = source as? kotlinx.serialization.json.JsonObject ?: return source
         val result = kotlinx.serialization.json.JsonObject(
-            obj.entries.map { (key, value) ->
-                mappings[key]?.let { mappedKey -> mappedKey to value } ?: key to value
+            obj.entries.associate { (key, value) ->
+                (mappings[key] ?: key) to value
             }
         )
         return result

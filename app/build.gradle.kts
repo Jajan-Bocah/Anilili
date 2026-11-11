@@ -280,6 +280,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.coil.compose)
     implementation(libs.qrcodegen)
+    implementation(libs.jsoup)
     implementation(libs.haze)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.work.runtime.ktx)

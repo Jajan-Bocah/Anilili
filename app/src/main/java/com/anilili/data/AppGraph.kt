@@ -140,7 +140,7 @@ object AppGraph {
         DubIndex.refresh(context, konoha)
         com.anilili.data.recs.Recommendations.attach(context, httpClient, konoha)
 
-        remoteProviderManager = RemoteProviderManager(context, json).also { it.init() }
+        remoteProviderManager = RemoteProviderManager(context, httpClient, json).also { it.init() }
 
         providerRegistry = UnifiedProviderRegistry(
             remoteConfigStore = remoteProviderManager.configStore,

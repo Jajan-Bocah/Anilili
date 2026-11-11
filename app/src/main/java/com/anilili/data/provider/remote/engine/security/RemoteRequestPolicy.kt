@@ -1,7 +1,7 @@
 package com.anilili.data.provider.remote.engine.security
 
-import android.util.Pair
 import com.anilili.diagnostics.DiagnosticsLog
+import kotlinx.serialization.Serializable
 import java.net.InetAddress
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
@@ -34,9 +34,7 @@ class RemoteRequestPolicy(
             return ValidationResult.deny("Only HTTPS URLs are allowed: $url")
         }
 
-        val parsedUrl = try {
-            URL(url)
-        } catch (e: Exception) {
+        val parsedUrl = try { URL(url) } catch (e: Exception) {
             return ValidationResult.deny("Invalid URL format: $url")
         }
 
@@ -79,7 +77,7 @@ class RemoteRequestPolicy(
     }
 
     fun incrementRequestCount(workflowId: String): Int {
-        return requestCount.compute(workflowId) { _, v -> (v ?: 0) + 1 }
+        return requestCount.compute(workflowId) { _, v -> (v ?: 0) + 1 } ?: 0
     }
 
     fun resetRequestCount(workflowId: String) {
@@ -105,7 +103,7 @@ class RemoteRequestPolicy(
         return try {
             val addresses = InetAddress.getAllByName(host)
             addresses.any { addr ->
-                val ip = addr.hostAddress
+                val ip = addr.hostAddress ?: return@any false
                 ip.startsWith("10.") ||
                 ip.startsWith("192.168.") ||
                 ip.startsWith("172.") && (16..31).contains(ip.substringAfter("172.").substringBefore(".").toIntOrNull() ?: -1) ||
@@ -122,6 +120,18 @@ class RemoteRequestPolicy(
         }
     }
 
+    @Serializable
+    data class SecurityConfig(
+        val allowedDomains: List<String> = emptyList(),
+        val maxResponseBytes: Long = 1024 * 1024,
+        val maxRequestsPerRun: Int = 20,
+        val connectTimeoutMs: Int = 10000,
+        val readTimeoutMs: Int = 15000,
+        val totalTimeoutMs: Int = 30000,
+        val allowRedirects: Boolean = true,
+        val maxRedirects: Int = 5,
+    )
+
     companion object {
         fun fromSecurityConfig(config: SecurityConfig): RemoteRequestPolicy {
             return RemoteRequestPolicy(
@@ -137,15 +147,3 @@ class RemoteRequestPolicy(
         }
     }
 }
-
-@Serializable
-data class SecurityConfig(
-    val allowedDomains: List<String> = emptyList(),
-    val maxResponseBytes: Long = 1024 * 1024,
-    val maxRequestsPerRun: Int = 20,
-    val connectTimeoutMs: Int = 10000,
-    val readTimeoutMs: Int = 15000,
-    val totalTimeoutMs: Int = 30000,
-    val allowRedirects: Boolean = true,
-    val maxRedirects: Int = 5,
-)

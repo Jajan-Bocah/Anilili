@@ -3,17 +3,19 @@ package com.anilili.data.provider.remote.config
 import android.content.Context
 import com.anilili.data.AppGraph
 import com.anilili.data.provider.registry.UnifiedProviderRegistry
-import com.anilili.data.provider.remote.config.RemoteConfigFetcher.RemoteConfigUpdateWorker
 import com.anilili.diagnostics.DiagnosticsLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import okhttp3.OkHttpClient
 
 class RemoteProviderManager(
     context: Context,
+    private val okHttpClient: OkHttpClient = OkHttpClient(),
     private val json: Json = Json { ignoreUnknownKeys = true; isLenient = true; coerceInputValues = true },
     private val validator: RemoteProviderConfigValidator = RemoteProviderConfigValidator.DEFAULT,
 ) {
@@ -21,8 +23,8 @@ class RemoteProviderManager(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val configStore = RemoteProviderConfigStore(appContext, json, validator)
-    val fetcher = RemoteConfigFetcher(appContext, configStore, validator, json)
-    val registry = UnifiedProviderRegistry(configStore)
+    val fetcher = RemoteConfigFetcher(appContext, configStore, validator, json, okHttpClient)
+    val registry = UnifiedProviderRegistry(configStore, okHttpClient, json)
 
     var isInitialized = false
 
@@ -57,7 +59,7 @@ class RemoteProviderManager(
         val current = configStore.getCurrentConfig()
         val rollbackResult = configStore.rollbackToLastKnownGood()
 
-        if (rollbackResult.success) {
+        return if (rollbackResult.success) {
             registry.refreshFromStore()
             RemoveSourceResult.success(previousConfig = rollbackResult.previousConfig)
         } else {

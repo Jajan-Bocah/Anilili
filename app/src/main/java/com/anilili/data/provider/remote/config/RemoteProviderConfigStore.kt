@@ -9,9 +9,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
+import java.nio.charset.StandardCharsets
+import okhttp3.MediaType
+import okhttp3.RequestBody
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -43,13 +47,13 @@ class RemoteProviderConfigStore(
         }
     }
 
-    suspend fun getCurrentConfig(): RemoteProviderList? = currentConfigRef.get()
+    fun getCurrentConfig(): RemoteProviderList? = currentConfigRef.get()
 
-    suspend fun getLastKnownGood(): RemoteProviderList? = lastKnownGoodRef.get()
+    fun getLastKnownGood(): RemoteProviderList? = lastKnownGoodRef.get()
 
-    suspend fun getConfigOriginUrl(): String? = configOriginUrlRef.get()
+    fun getConfigOriginUrl(): String? = configOriginUrlRef.get()
 
-    suspend fun hasConfig(): Boolean = currentConfigRef.get() != null
+    fun hasConfig(): Boolean = currentConfigRef.get() != null
 
     suspend fun updateConfig(
         config: RemoteProviderConfig,
@@ -57,99 +61,86 @@ class RemoteProviderConfigStore(
         etag: String? = null,
         lastModified: String? = null,
     ): UpdateResult {
-        return writeLock.withLock {
-            val validation = validator.validate(config, originalUrl)
-            if (!validation.isValid) {
-                return@withLock UpdateResult.failure(validation.errors)
+        return withContext(Dispatchers.IO) {
+            writeLock.withLock {
+                val validation = validator.validate(config, originalUrl)
+                if (!validation.isValid) {
+                    return@withLock UpdateResult.failure(validation.errors)
+                }
+
+                val previousConfig = currentConfigRef.get()
+                val previousLkg = lastKnownGoodRef.get()
+                val previousOriginUrl = configOriginUrlRef.get()
+
+                val newList = RemoteProviderList(
+                    config = config,
+                    originalUrl = originalUrl,
+                    fetchedAt = System.currentTimeMillis(),
+                    etag = etag,
+                    lastModified = lastModified,
+                )
+
+                val writeResult = writeToDisk(newList, previousConfig, previousLkg, previousOriginUrl)
+                if (!writeResult.success) {
+                    return@withLock UpdateResult.failure(writeResult.errors)
+                }
+
+                currentConfigRef.set(newList)
+                configOriginUrlRef.set(originalUrl)
+
+                if (previousConfig == null) {
+                    lastKnownGoodRef.set(newList)
+                    writeLastKnownGood(newList)
+                }
+
+                return@withLock UpdateResult.success(
+                    isFirstConfig = previousConfig == null,
+                    wasRollback = false,
+                )
             }
-
-            val previousConfig = currentConfigRef.get()
-            val previousLkg = lastKnownGoodRef.get()
-            val previousOriginUrl = configOriginUrlRef.get()
-
-            val newList = RemoteProviderList(
-                config = config,
-                originalUrl = originalUrl,
-                fetchedAt = System.currentTimeMillis(),
-                etag = etag,
-                lastModified = lastModified,
-            )
-
-            val writeResult = writeToDisk(newList, previousConfig, previousLkg, previousOriginUrl)
-            if (!writeResult.success) {
-                return@withLock UpdateResult.failure(writeResult.errors)
-            }
-
-            currentConfigRef.set(newList)
-            configOriginUrlRef.set(originalUrl)
-
-            if (previousConfig == null) {
-                lastKnownGoodRef.set(newList)
-                writeLastKnownGood(newList)
-            }
-
-            return@withLock UpdateResult.success(
-                isFirstConfig = previousConfig == null,
-                wasRollback = false,
-            )
         }
     }
 
     suspend fun rollbackToLastKnownGood(): RollbackResult {
-        return writeLock.withLock {
-            val lkg = lastKnownGoodRef.get() ?: return@withLock RollbackResult.failure("No last-known-good config available")
-            val current = currentConfigRef.get()
+        return withContext(Dispatchers.IO) {
+            writeLock.withLock {
+                val lkg = lastKnownGoodRef.get() ?: return@withLock RollbackResult.failure("No last-known-good config available")
+                val current = currentConfigRef.get()
 
-            val writeResult = writeToDisk(lkg, current, lkg, configOriginUrlRef.get())
-            if (!writeResult.success) {
-                return@withLock RollbackResult.failure(writeResult.errors.firstOrNull() ?: "Write failed")
+                val writeResult = writeToDisk(lkg, current, lkg, configOriginUrlRef.get())
+                if (!writeResult.success) {
+                    return@withLock RollbackResult.failure(writeResult.errors.firstOrNull() ?: "Write failed")
+                }
+
+                currentConfigRef.set(lkg)
+                return@withLock RollbackResult.success(previousConfig = current)
             }
-
-            currentConfigRef.set(lkg)
-            return@withLock RollbackResult.success(previousConfig = current)
         }
     }
 
     suspend fun clearConfig(): Boolean {
-        return writeLock.withLock {
-            currentConfigRef.set(null)
-            configOriginUrlRef.set(null)
-            currentFile.delete()
-            originUrlFile.delete()
-            true
-        }
-    }
-
-    private suspend fun loadFromDisk() {
-        try {
-            val current = readCurrent()
-            val lkg = readLastKnownGood()
-            val originUrl = readOriginUrl()
-
-            current?.let { currentConfigRef.set(it) }
-            lkg?.let { lastKnownGoodRef.set(it) }
-            originUrl?.let { configOriginUrlRef.set(it) }
-
-            if (current == null && lkg != null) {
-                currentConfigRef.set(lkg)
-                writeCurrent(lkg)
+        return withContext(Dispatchers.IO) {
+            writeLock.withLock {
+                currentConfigRef.set(null)
+                configOriginUrlRef.set(null)
+                currentFile.delete()
+                originUrlFile.delete()
+                true
             }
-        } catch (e: Exception) {
-            DiagnosticsLog.throwable("RemoteProviderConfigStore load failed", e)
         }
     }
 
-    private fun readCurrent(): RemoteProviderList? = withContext(Dispatchers.IO) {
-        readFile(currentFile)
+    private suspend fun readCurrent(): RemoteProviderList? {
+        return readFile(currentFile)
     }
 
-    private fun readLastKnownGood(): RemoteProviderList? = withContext(Dispatchers.IO) {
-        readFile(lastKnownGoodFile)
+    private suspend fun readLastKnownGood(): RemoteProviderList? {
+        return readFile(lastKnownGoodFile)
     }
 
-    private fun readOriginUrl(): String? = withContext(Dispatchers.IO) {
-        if (!originUrlFile.isFile) return@withContext null
-        FileInputStream(originUrlFile).use { input ->
+    private suspend fun readOriginUrl(): String? {
+        if (!originUrlFile.isFile) return null
+        return FileInputStream(originUrlFile).use { input ->
             input.readBytes().decodeToString().trim().takeIf { it.isNotBlank() }
         }
     }
@@ -172,36 +163,34 @@ class RemoteProviderConfigStore(
         previousLkg: RemoteProviderList?,
         previousOriginUrl: String?,
     ): WriteResult {
-        return withContext(Dispatchers.IO) {
-            val tempCurrent = File(storeDirectory, ".${CURRENT_FILE_NAME}.${System.nanoTime()}.tmp")
-            val tempOrigin = File(storeDirectory, ".${ORIGIN_URL_FILE_NAME}.${System.nanoTime()}.tmp")
-            val tempLkg = File(storeDirectory, ".${LKG_FILE_NAME}.${System.nanoTime()}.tmp")
+        val tempCurrent = File(storeDirectory, ".${CURRENT_FILE_NAME}.${System.nanoTime()}.tmp")
+        val tempOrigin = File(storeDirectory, ".${ORIGIN_URL_FILE_NAME}.${System.nanoTime()}.tmp")
+        val tempLkg = File(storeDirectory, ".${LKG_FILE_NAME}.${System.nanoTime()}.tmp")
 
-            try {
-                writeFile(tempCurrent, newList)
-                writeFile(tempOrigin, newList.originalUrl)
+        try {
+            writeFile(tempCurrent, newList)
+            writeFile(tempOrigin, newList.originalUrl)
 
-                if (previousLkg == null) {
-                    writeFile(tempLkg, newList)
-                }
-
-                atomicReplace(tempCurrent, currentFile)
-                atomicReplace(tempOrigin, originUrlFile)
-                if (previousLkg == null) {
-                    atomicReplace(tempLkg, lastKnownGoodFile)
-                }
-
-                WriteResult.success()
-            } catch (e: Exception) {
-                tempCurrent.delete()
-                tempOrigin.delete()
-                tempLkg.delete()
-                WriteResult.failure("Write failed: ${e.message}")
+            if (previousLkg == null) {
+                writeFile(tempLkg, newList)
             }
+
+            atomicReplace(tempCurrent, currentFile)
+            atomicReplace(tempOrigin, originUrlFile)
+            if (previousLkg == null) {
+                atomicReplace(tempLkg, lastKnownGoodFile)
+            }
+
+            return WriteResult.success()
+        } catch (e: Exception) {
+            tempCurrent.delete()
+            tempOrigin.delete()
+            tempLkg.delete()
+            return WriteResult.failure("Write failed: ${e.message}")
         }
     }
 
-    private fun writeCurrent(list: RemoteProviderList) = withContext(Dispatchers.IO) {
+    private suspend fun writeCurrent(list: RemoteProviderList) {
         val temp = File(storeDirectory, ".${CURRENT_FILE_NAME}.${System.nanoTime()}.tmp")
         try {
             writeFile(temp, list)
@@ -212,7 +201,7 @@ class RemoteProviderConfigStore(
         }
     }
 
-    private fun writeLastKnownGood(list: RemoteProviderList) = withContext(Dispatchers.IO) {
+    private suspend fun writeLastKnownGood(list: RemoteProviderList) {
         val temp = File(storeDirectory, ".${LKG_FILE_NAME}.${System.nanoTime()}.tmp")
         try {
             writeFile(temp, list)
@@ -231,7 +220,7 @@ class RemoteProviderConfigStore(
                 is String -> data
                 else -> throw IllegalArgumentException("Unsupported data type")
             }
-            output.write(jsonString.toByteArray(Charsets.UTF_8))
+            output.write(jsonString.toByteArray(StandardCharsets.UTF_8))
             output.flush()
             output.fd.sync()
         }
@@ -251,6 +240,20 @@ class RemoteProviderConfigStore(
         const val BACKUP_FILE_NAME = "backup.json"
         const val LKG_FILE_NAME = "last-known-good.json"
         const val ORIGIN_URL_FILE_NAME = "origin-url.txt"
+    }
+
+    private suspend fun loadFromDisk() {
+        val current = readCurrent()
+        val lkg = readLastKnownGood()
+        val originUrl = readOriginUrl()
+
+        currentConfigRef.set(current)
+        lastKnownGoodRef.set(lkg ?: current)
+        configOriginUrlRef.set(originUrl)
+
+        if (current != null && lkg == null) {
+            writeLastKnownGood(current)
+        }
     }
 }
 

@@ -121,7 +121,9 @@ data class AssertStep(
 }
 
 @Serializable
-sealed interface AssertCondition
+sealed interface AssertCondition {
+    val type: String
+}
 
 @Serializable
 data class NotNullCondition(override val type: String = "not_null") : AssertCondition
@@ -145,7 +147,9 @@ data class FilterStep(
 ) : WorkflowStep
 
 @Serializable
-sealed interface FilterPredicate
+sealed interface FilterPredicate {
+    val type: String
+}
 
 @Serializable
 data class NotNullPredicate(override val type: String = "not_null") : FilterPredicate

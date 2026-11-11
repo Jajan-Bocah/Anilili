@@ -39,6 +39,7 @@ import com.anilili.data.model.ViewerStatistics
 import com.anilili.data.library.WatchedTitles
 import com.anilili.data.model.WatchedFilter
 import com.anilili.data.provider.registry.UnifiedProviderRegistry
+import com.anilili.data.provider.registry.UnifiedSourceType
 import com.anilili.data.remote.AniListClient
 import com.anilili.data.remote.AniZipClient
 import com.anilili.data.remote.AniSkipClient
@@ -125,11 +126,11 @@ internal fun providerAttemptOrder(
             if (name.isNotBlank() && name != DEFAULT_PREFERRED_PROVIDER && name !in this) add(name)
         }
     }
-    val available = (chosen + providerNames.sortedBy { providerRegistry.sortKey(it) }).distinct()
-    val preferredSource = providerRegistry.getSourceType(preferred)
+    val available = (chosen + providerNames.sortedBy { ProviderCatalog.sortKey(it) }).distinct()
+    val preferredSource = ProviderCatalog.sourceOf(preferred)
     val rest = available.filterNot { it in chosen }
-    val sameSource = rest.filter { providerRegistry.getSourceType(it) == preferredSource }
-    val otherSource = rest.filter { providerRegistry.getSourceType(it) != preferredSource }
+    val sameSource = rest.filter { ProviderCatalog.sourceOf(it) == preferredSource }
+    val otherSource = rest.filter { ProviderCatalog.sourceOf(it) != preferredSource }
 
     return buildList {
         addAll(chosen)
@@ -139,6 +140,13 @@ internal fun providerAttemptOrder(
         }
     }
 }
+
+internal fun providerAttemptOrder(
+    preferred: String,
+    providerNames: List<String>,
+    providerRegistry: UnifiedProviderRegistry,
+    fallbacks: List<String> = emptyList(),
+): List<String> = providerAttemptOrder(preferred, providerNames, fallbacks)
 
 /**
  * [ordered] with the servers that are not in English ([ProviderCatalog.declaredLanguage]) held to
@@ -172,6 +180,15 @@ internal fun languageGatedAttemptOrder(
     val lead = kept.firstOrNull()?.takeIf { it.lowercase() in handPicked && it.equals(preferred, ignoreCase = true) }
     return listOfNotNull(lead) + wanted.filterNot { it == lead } + kept.filterNot { it == lead || it in wanted }
 }
+
+internal fun languageGatedAttemptOrder(
+    ordered: List<String>,
+    preferred: String,
+    providerRegistry: UnifiedProviderRegistry,
+    userRanked: Collection<String>,
+    wantedLanguage: String?,
+    declaredLanguage: (String) -> String? = ProviderCatalog::declaredLanguage,
+): List<String> = languageGatedAttemptOrder(ordered, preferred, userRanked, wantedLanguage, declaredLanguage)
 
 /**
  * The language the viewer asked for on a [category] row, by the name [ProviderCatalog] declares
@@ -2377,7 +2394,7 @@ class MiruroRepository(
                 onProvider = onPartial?.let { deliver ->
                     { row ->
                         answered[row.name] = row
-                        deliver(EpisodesResult(answered.values.sortedBy { providerRegistry.sortKey(it.name) }))
+                        deliver(EpisodesResult(answered.values.sortedBy { ProviderCatalog.sortKey(it.name) }))
                     }
                 },
             ).also {
@@ -2406,7 +2423,7 @@ class MiruroRepository(
         val replaced = b.providerNames.toSet()
         return EpisodesResult(
             (a.providers.filterNot { it.name in replaced } + b.providers)
-                .sortedBy { providerRegistry.sortKey(it.name) },
+                .sortedBy { ProviderCatalog.sortKey(it.name) },
         )
     }
 
@@ -2416,11 +2433,11 @@ class MiruroRepository(
         variant: SourceVariant,
         anilistId: Int,
         allowInteractiveChallenges: Boolean = true,
-    ): SourcesResult = when (providerRegistry.getSourceType(provider)) {
-        UnifiedSourceType.ANIVEXA, UnifiedSourceType.REMOTE_JSON -> 
-            anivexa.getSources(pipeId, animeInfo(anilistId), allowInteractiveChallenges)
-        UnifiedSourceType.MIRURO, UnifiedSourceType.REMOTE_HTML ->
-            pipe.getSources(pipeId, provider, variant, anilistId)
+    ): SourcesResult = when (ProviderCatalog.sourceOf(provider)) {
+        ProviderCatalog.Source.ANIVEXA, ProviderCatalog.Source.MIRURO -> when (ProviderCatalog.sourceOf(provider)) {
+            ProviderCatalog.Source.ANIVEXA -> anivexa.getSources(pipeId, animeInfo(anilistId), allowInteractiveChallenges)
+            ProviderCatalog.Source.MIRURO -> pipe.getSources(pipeId, provider, variant, anilistId)
+        }
         else -> throw IllegalArgumentException("Unknown provider source type for $provider")
     }
 
@@ -2475,9 +2492,7 @@ class MiruroRepository(
         }
         fun attemptTimeoutFor(provider: String): Long = when {
             provider == interactiveProvider -> INTERACTIVE_SOURCE_TIMEOUT_MS
-            providerRegistry.getSourceType(provider) == UnifiedSourceType.MIRURO ->
-                PipeBridge.sourceAttemptTimeoutMs()
-            providerRegistry.requiresResolverWebView(provider) -> WEBVIEW_SOURCE_ATTEMPT_TIMEOUT_MS
+            ProviderCatalog.requiresResolverWebView(provider) -> WEBVIEW_SOURCE_ATTEMPT_TIMEOUT_MS
             else -> PROVIDER_SOURCE_ATTEMPT_TIMEOUT_MS
         }
         // Debug-only measurement mode. A benchmark cannot use the normal path: the route's
@@ -2496,6 +2511,7 @@ class MiruroRepository(
         val ordered = providerAttemptOrder(
             preferred = pinned ?: preferred,
             providerNames = episodes.providerNames,
+            providerRegistry = providerRegistry,
             // Everything the user ranked behind their first choice, in their order.
             fallbacks = SettingsStore.serverPriority.value.drop(1),
         ).let { names -> if (pinned != null) names.filter { it.equals(pinned, true) } else names }
@@ -2506,7 +2522,7 @@ class MiruroRepository(
                     // A hand-made ranking in Settings still leads, then the catalogue's default
                     // priority; only what both leave unranked is ordered by measurement.
                     val ranked = userRanked.filter { it in names }
-                    val defaults = providerRegistry.defaultPriority().filter { it in names && it !in ranked }
+                    val defaults = ProviderCatalog.defaultPriority.filter { it in names && it !in ranked }
                     ranked + defaults + ProviderSpeed.rank(names.filterNot { it in ranked || it in defaults })
                 }
             }
@@ -2514,7 +2530,7 @@ class MiruroRepository(
                 if (pinned != null) {
                     names
                 } else {
-                    languageGatedAttemptOrder(names, preferred, userRanked, preferredLanguageFor(category))
+                    languageGatedAttemptOrder(names, preferred, providerRegistry, userRanked, preferredLanguageFor(category))
                 }
             }
         val candidates = ordered.flatMap { name ->

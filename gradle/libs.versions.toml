@@ -36,9 +36,11 @@ materialColorUtilities = "2.1.1"
 # Nayuki's QR encoder: one plain-Java class tree, no Android or reflection. Draws the code a phone
 # scans to send a profile picture to the TV.
 qrcodegen = "1.8.0"
+jsoup = "1.18.3"
 
 [libraries]
 qrcodegen = { group = "io.nayuki", name = "qrcodegen", version.ref = "qrcodegen" }
+jsoup = { group = "org.jsoup", name = "jsoup", version.ref = "jsoup" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }

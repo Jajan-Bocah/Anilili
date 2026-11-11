@@ -21,7 +21,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
-import java.util.concurrent.TimeUnit
 
 class WorkflowRemoteProviderRuntime(
     private val baseRuntime: RemoteProviderRuntime,
@@ -48,7 +47,7 @@ class WorkflowRemoteProviderRuntime(
         val workflow = workflows["episodes"] ?: return null
         val result = executor.execute(
             workflow,
-            mapOf("anilistId" to anilistId, "title" to title ?: ""),
+            mapOf<String, Any>("anilistId" to anilistId, "title" to (title ?: "")),
             "${entry.id}_episodes_$anilistId"
         )
 
@@ -130,18 +129,4 @@ class WorkflowRemoteProviderRuntime(
         val language: String?,
         val variant: SourceVariant,
     )
-
-    companion object {
-        fun create(
-            entry: RemoteProviderEntry,
-            workflows: Map<String, WorkflowDefinition>,
-            okHttpClient: OkHttpClient,
-            json: Json,
-            requestPolicy: RemoteRequestPolicy,
-        ): WorkflowRemoteProviderRuntime {
-            val baseRuntime = entry.toRuntime()
-            val executor = WorkflowExecutor(okHttpClient, requestPolicy)
-            return WorkflowRemoteProviderRuntime(baseRuntime, workflows, executor, json)
-        }
-    }
 }

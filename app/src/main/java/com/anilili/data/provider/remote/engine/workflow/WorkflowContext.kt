@@ -27,7 +27,6 @@ enum class OutputType {
     RAW,
 }
 
-@Serializable
 data class WorkflowContext(
     val variables: MutableMap<String, Any> = mutableMapOf(),
     val metadata: MutableMap<String, String> = mutableMapOf(),
@@ -41,7 +40,7 @@ data class WorkflowContext(
     }
 
     fun getList(key: String): List<Any>? {
-        return variables[key] as? List<*>
+        return (variables[key] as? List<*>)?.filterIsInstance<Any>()
     }
 
     fun put(key: String, value: Any) {

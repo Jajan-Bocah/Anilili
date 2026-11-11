@@ -3,20 +3,20 @@ package com.anilili.data.provider.remote.runtime
 import com.anilili.data.provider.remote.config.RemoteProviderConfig
 import com.anilili.data.provider.remote.config.RemoteProviderEntry
 import com.anilili.data.provider.remote.engine.security.RemoteRequestPolicy
+import com.anilili.data.provider.remote.engine.security.RemoteRequestPolicy.SecurityConfig
 import com.anilili.data.provider.remote.engine.workflow.WorkflowDefinition
 import com.anilili.data.provider.remote.engine.workflow.WorkflowExecutor
 import com.anilili.diagnostics.DiagnosticsLog
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
-import java.util.concurrent.TimeUnit
 
 class RemoteProviderRuntimeFactory(
     private val okHttpClient: OkHttpClient,
     private val json: Json,
 ) {
 
-    fun createRuntime(entry: RemoteProviderEntry, config: RemoteProviderConfig): RemoteProviderRuntime? {
-        val requestPolicy = RemoteRequestPolicy.fromSecurityConfig(config.metadata.security ?: SecurityConfig())
+    fun createRuntime(entry: RemoteProviderEntry, config: RemoteProviderConfig): WorkflowRemoteProviderRuntime? {
+        val requestPolicy = RemoteRequestPolicy.fromSecurityConfig(config.security ?: SecurityConfig())
         val workflows = parseWorkflows(entry, config)
 
         if (workflows.isEmpty()) {
@@ -54,7 +54,7 @@ class RemoteProviderRuntimeFactory(
         return workflows
     }
 
-    private fun parseStep(stepConfig: WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.WorkflowStep {
+    private fun parseStep(stepConfig: com.anilili.data.provider.remote.config.WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.WorkflowStep {
         return when (stepConfig.op) {
             "http" -> parseHttpStep(stepConfig)
             "parse_html" -> parseParseHtmlStep(stepConfig)
@@ -69,7 +69,7 @@ class RemoteProviderRuntimeFactory(
         }
     }
 
-    private fun parseHttpStep(config: WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.HttpStep {
+    private fun parseHttpStep(config: com.anilili.data.provider.remote.config.WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.HttpStep {
         return com.anilili.data.provider.remote.engine.workflow.HttpStep(
             id = config.id ?: "http_${System.currentTimeMillis()}",
             method = com.anilili.data.provider.remote.engine.workflow.HttpMethod.valueOf(config.params["method"]?.uppercase() ?: "GET"),
@@ -84,7 +84,7 @@ class RemoteProviderRuntimeFactory(
         )
     }
 
-    private fun parseParseHtmlStep(config: WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.ParseHtmlStep {
+    private fun parseParseHtmlStep(config: com.anilili.data.provider.remote.config.WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.ParseHtmlStep {
         return com.anilili.data.provider.remote.engine.workflow.ParseHtmlStep(
             id = config.id ?: "parse_html_${System.currentTimeMillis()}",
             input = config.params["input"] ?: "",
@@ -92,7 +92,7 @@ class RemoteProviderRuntimeFactory(
         )
     }
 
-    private fun parseSelectStep(config: WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.SelectStep {
+    private fun parseSelectStep(config: com.anilili.data.provider.remote.config.WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.SelectStep {
         return com.anilili.data.provider.remote.engine.workflow.SelectStep(
             id = config.id ?: "select_${System.currentTimeMillis()}",
             input = config.params["input"] ?: "",
@@ -103,7 +103,7 @@ class RemoteProviderRuntimeFactory(
         )
     }
 
-    private fun parseParseJsonStep(config: WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.ParseJsonStep {
+    private fun parseParseJsonStep(config: com.anilili.data.provider.remote.config.WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.ParseJsonStep {
         return com.anilili.data.provider.remote.engine.workflow.ParseJsonStep(
             id = config.id ?: "parse_json_${System.currentTimeMillis()}",
             input = config.params["input"] ?: "",
@@ -112,7 +112,7 @@ class RemoteProviderRuntimeFactory(
         )
     }
 
-    private fun parseRegexStep(config: WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.RegexStep {
+    private fun parseRegexStep(config: com.anilili.data.provider.remote.config.WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.RegexStep {
         return com.anilili.data.provider.remote.engine.workflow.RegexStep(
             id = config.id ?: "regex_${System.currentTimeMillis()}",
             input = config.params["input"] ?: "",
@@ -123,7 +123,7 @@ class RemoteProviderRuntimeFactory(
         )
     }
 
-    private fun parseMapStep(config: WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.MapStep {
+    private fun parseMapStep(config: com.anilili.data.provider.remote.config.WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.MapStep {
         return com.anilili.data.provider.remote.engine.workflow.MapStep(
             id = config.id ?: "map_${System.currentTimeMillis()}",
             input = config.params["input"] ?: "",
@@ -132,7 +132,7 @@ class RemoteProviderRuntimeFactory(
         )
     }
 
-    private fun parseNormalizeStep(config: WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.NormalizeStep {
+    private fun parseNormalizeStep(config: com.anilili.data.provider.remote.config.WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.NormalizeStep {
         val operations = parseNormalizeOperations(config.params["operations"])
         return com.anilili.data.provider.remote.engine.workflow.NormalizeStep(
             id = config.id ?: "normalize_${System.currentTimeMillis()}",
@@ -142,7 +142,7 @@ class RemoteProviderRuntimeFactory(
         )
     }
 
-    private fun parseAssertStep(config: WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.AssertStep {
+    private fun parseAssertStep(config: com.anilili.data.provider.remote.config.WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.AssertStep {
         val condition = parseAssertCondition(config.params["condition"])
         return com.anilili.data.provider.remote.engine.workflow.AssertStep(
             id = config.id ?: "assert_${System.currentTimeMillis()}",
@@ -152,7 +152,7 @@ class RemoteProviderRuntimeFactory(
         )
     }
 
-    private fun parseFilterStep(config: WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.FilterStep {
+    private fun parseFilterStep(config: com.anilili.data.provider.remote.config.WorkflowStepConfig): com.anilili.data.provider.remote.engine.workflow.FilterStep {
         val predicate = parseFilterPredicate(config.params["predicate"])
         return com.anilili.data.provider.remote.engine.workflow.FilterStep(
             id = config.id ?: "filter_${System.currentTimeMillis()}",
@@ -162,10 +162,10 @@ class RemoteProviderRuntimeFactory(
         )
     }
 
-    private fun parseOutput(outputConfig: WorkflowOutputConfig?): com.anilili.data.provider.remote.engine.workflow.WorkflowOutput {
+    private fun parseOutput(outputConfig: com.anilili.data.provider.remote.config.WorkflowOutputConfig?): com.anilili.data.provider.remote.engine.workflow.WorkflowOutput {
         return com.anilili.data.provider.remote.engine.workflow.WorkflowOutput(
             type = com.anilili.data.provider.remote.engine.workflow.OutputType.valueOf(outputConfig?.type?.uppercase() ?: "RAW"),
-            mapping = parseStringMap(outputConfig?.mapping),
+            mapping = outputConfig?.mapping ?: emptyMap(),
         )
     }
 
@@ -185,38 +185,3 @@ class RemoteProviderRuntimeFactory(
         return jsonStr?.let { json.decodeFromString(it) } ?: com.anilili.data.provider.remote.engine.workflow.NotNullPredicate()
     }
 }
-
-@Serializable
-data class SecurityConfig(
-    val allowedDomains: List<String> = emptyList(),
-    val maxResponseBytes: Long = 1024 * 1024,
-    val maxRequestsPerRun: Int = 20,
-    val connectTimeoutMs: Int = 10000,
-    val readTimeoutMs: Int = 15000,
-    val totalTimeoutMs: Int = 30000,
-    val allowRedirects: Boolean = true,
-    val maxRedirects: Int = 5,
-)
-
-@Serializable
-data class RemoteWorkflowConfig(
-    val name: String?,
-    val version: String?,
-    val description: String?,
-    val steps: List<WorkflowStepConfig>?,
-    val output: WorkflowOutputConfig?,
-)
-
-@Serializable
-data class WorkflowStepConfig(
-    val op: String,
-    val id: String?,
-    val params: Map<String, String> = emptyMap(),
-    val saveAs: String?,
-)
-
-@Serializable
-data class WorkflowOutputConfig(
-    val type: String?,
-    val mapping: Map<String, String> = emptyMap(),
-)

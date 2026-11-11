@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.PeriodicWorkRequest
 import androidx.work.WorkManager
 import androidx.work.NetworkType
@@ -33,8 +34,10 @@ class RemoteConfigFetcher(
     private val client = okHttpClient ?: buildDefaultClient()
     private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
 
-    private const val MAX_RESPONSE_SIZE = 512 * 1024
-    private const val FETCH_TIMEOUT_MS = 30_000
+    companion object {
+        private const val MAX_RESPONSE_SIZE = 512L * 1024
+        private const val FETCH_TIMEOUT_MS = 30_000L
+    }
 
     private fun buildDefaultClient(): OkHttpClient {
         return OkHttpClient.Builder()
@@ -189,7 +192,7 @@ class RemoteConfigUpdateWorker(
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(
                 "${WORK_NAME}_manual",
-                ExistingPeriodicWorkPolicy.REPLACE,
+                ExistingWorkPolicy.REPLACE,
                 request,
             )
         }

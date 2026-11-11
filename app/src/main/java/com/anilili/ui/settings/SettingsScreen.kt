@@ -93,11 +93,20 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.anilili.data.provider.remote.config.RemoteProviderManager
+import com.anilili.data.provider.remote.config.RemoteProviderConfigStore
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
 import com.anilili.BuildConfig
 import com.anilili.data.ProviderCatalog
 import com.anilili.data.auth.AccountService
@@ -2450,7 +2459,7 @@ fun SettingsScreen(
                     MidnightSettingRow(
                         title = "Custom sources",
                         description = "Add and manage remote provider configs",
-                        value = customSourcesSummary(),
+                        value = CustomSourcesSummary(),
                         onClick = { openPicker = SettingsPicker.CUSTOM_SOURCES },
                     )
                 }
@@ -3604,13 +3613,23 @@ private fun enabledServersSummary(disabled: Set<String>, hideAdult: Boolean): St
     return if (enabled == servers.size) "All ${servers.size}" else "$enabled of ${servers.size}"
 }
 
-private fun customSourcesSummary(): String {
+@Composable
+private fun CustomSourcesSummary(): String {
     val remoteProviderManager = com.anilili.data.AppGraph.remoteProviderManager
-    val hasConfig = remoteProviderManager.configStore.hasConfig()
-    val config = remoteProviderManager.configStore.getCurrentConfig()
-    if (!hasConfig || config == null) return "None"
-    val providerCount = config.config.providers.size
-    return "$providerCount providers"
+    var summary by remember { mutableStateOf("Loading...") }
+
+    LaunchedEffect(remoteProviderManager) {
+        summary = remoteProviderManager.configStore.hasConfig().let { hasConfig ->
+            if (!hasConfig) "None"
+            else {
+                val config = remoteProviderManager.configStore.getCurrentConfig()
+                if (config == null) "None"
+                else "${config.config.providers.size} providers"
+            }
+        }
+    }
+
+    return summary
 }
 
 @Composable
@@ -4182,6 +4201,7 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
     var addError by remember { mutableStateOf<String?>(null) }
     var testingSource by remember { mutableStateOf<String?>(null) }
     var testResult by remember { mutableStateOf<String?>(null) }
+    var showRemoveConfirm by remember { mutableStateOf(false) }
 
     val currentConfig = remoteProviderManager.configStore.getCurrentConfig()
     val hasConfig = currentConfig != null
@@ -4220,7 +4240,7 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
                     isError = addError != null,
                     supportingText = { if (addError != null) Text(addError!!) },
                     singleLine = true,
-                    keyboardOptions = androidx.compose.ui.text.input.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 )
 
                 Row(
@@ -4231,17 +4251,17 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
                         Text("Cancel")
                     }
                     Spacer(Modifier.width(8.dp))
-                    androidx.compose.material3.FilledButton(
+                    Button(
                         onClick = {
                             addError = null
                             if (!configUrl.startsWith("https://")) {
                                 addError = "URL must use HTTPS"
-                                return@FilledButton
+                                return@Button
                             }
                             isAdding = true
                             scope.launch {
                                 try {
-                                    val result = remoteProviderManager.addCustomSource(configUrl).await()
+                                    val result = remoteProviderManager.addCustomSource(configUrl)
                                     if (result.success) {
                                         configUrl = ""
                                     } else {
@@ -4337,7 +4357,7 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
                                     testResult = null
                                     scope.launch {
                                         try {
-                                            val result = remoteProviderManager.fetcher.manualUpdate(configUrlDisplay).await()
+                                            val result = remoteProviderManager.fetcher.manualUpdate(configUrlDisplay)
                                             testResult = if (result.success) "Test passed: ${result.message}" else "Test failed: ${result.error}"
                                         } catch (e: Exception) {
                                             testResult = "Test error: ${e.message}"
@@ -4369,7 +4389,7 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
                         androidx.compose.material3.OutlinedButton(
                             onClick = {
                                 scope.launch {
-                                    val result = remoteProviderManager.fetcher.manualUpdate(configUrlDisplay).await()
+                                    val result = remoteProviderManager.fetcher.manualUpdate(configUrlDisplay)
                                     // Result handled by UI refresh
                                 }
                             },
@@ -4378,24 +4398,13 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
                         }
 
                         // Remove button
-                        androidx.compose.material3.OutlinedButton(
+                        OutlinedButton(
                             onClick = {
-                                MidnightConfirmDialog(
-                                    title = "Remove custom source?",
-                                    body = "This will remove the custom source configuration and restore the last known good config if available.",
-                                    confirmText = "Remove",
-                                    onConfirm = {
-                                        scope.launch {
-                                            val result = remoteProviderManager.removeCustomSource().await()
-                                            // Result handled by UI refresh
-                                        }
-                                    },
-                                    onDismiss = {},
-                                )
+                                showRemoveConfirm = true
                             },
-                            colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                            colors = ButtonDefaults.outlinedButtonColors(
                                 contentColor = MaterialTheme.colorScheme.error,
-                                outlinedBorder = androidx.compose.ui.graphics.BorderStroke(1.dp, MaterialTheme.colorScheme.error),
                             ),
                         ) {
                             Text("Remove custom source", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error)
@@ -4403,6 +4412,22 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
                     }
                 }
             }
+        }
+
+        if (showRemoveConfirm) {
+            MidnightConfirmDialog(
+                kicker = "Custom sources",
+                title = "Remove custom source?",
+                body = "This will remove the custom source configuration and restore the last known good config if available.",
+                confirmText = "Remove",
+                onConfirm = {
+                    showRemoveConfirm = false
+                    scope.launch {
+                        remoteProviderManager.removeCustomSource()
+                    }
+                },
+                onDismiss = { showRemoveConfirm = false },
+            )
         }
     }
 }

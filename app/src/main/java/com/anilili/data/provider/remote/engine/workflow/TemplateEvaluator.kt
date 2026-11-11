@@ -15,7 +15,7 @@ object TemplateEvaluator {
         while (matcher.find()) {
             val varName = matcher.group(1).trim()
             val value = resolveVariable(varName, context)
-            matcher.appendReplacement(buffer, value?.replace("\\", "\\\\").replace("$", "\\$") ?: "")
+            matcher.appendReplacement(buffer, value?.replace("\\", "\\\\")?.replace("$", "\\$") ?: "")
         }
         matcher.appendTail(buffer)
 
