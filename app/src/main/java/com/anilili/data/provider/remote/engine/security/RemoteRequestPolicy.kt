@@ -1,5 +1,6 @@
 package com.anilili.data.provider.remote.engine.security
 
+import com.anilili.data.provider.remote.config.RemoteSourceTrust
 import com.anilili.diagnostics.DiagnosticsLog
 import kotlinx.serialization.Serializable
 import java.net.InetAddress
@@ -15,6 +16,7 @@ class RemoteRequestPolicy(
     private val totalTimeoutMs: Int = 30000,
     private val allowRedirects: Boolean = true,
     private val maxRedirects: Int = 5,
+    val trust: RemoteSourceTrust? = null,
 ) {
     private val requestCount = ConcurrentHashMap<String, Int>()
 
@@ -30,22 +32,38 @@ class RemoteRequestPolicy(
     }
 
     fun validateRequest(url: String, workflowId: String): ValidationResult {
-        if (!isHttpsUrl(url)) {
-            return ValidationResult.deny("Only HTTPS URLs are allowed: $url")
-        }
-
         val parsedUrl = try { URL(url) } catch (e: Exception) {
             return ValidationResult.deny("Invalid URL format: $url")
         }
 
         val host = parsedUrl.host.lowercase()
 
-        if (allowedDomains.isNotEmpty() && host !in allowedDomains && !allowedDomains.any { host.endsWith(".$it") }) {
-            return ValidationResult.deny("Domain '$host' is not in allowed domains list")
+        if (RemoteSourceTrust.isLoopbackHost(host)) {
+            return ValidationResult.deny("Access to loopback addresses is blocked: $host")
         }
 
-        if (isPrivateOrReservedIp(host)) {
-            return ValidationResult.deny("Access to private/reserved IP addresses is blocked: $host")
+        val protocol = parsedUrl.protocol.lowercase()
+        if (protocol != "https" && protocol != "http") {
+            return ValidationResult.deny("Only HTTP and HTTPS URLs are allowed: $url")
+        }
+
+        if (protocol == "http") {
+            val isTrustedHttp = trust != null && trust.allowHttpEndpoints && trust.isEndpointOriginTrusted(url)
+            if (!isTrustedHttp) {
+                return ValidationResult.deny("Only HTTPS URLs are allowed without explicit user trust: $url")
+            }
+        }
+
+        if (RemoteSourceTrust.isPrivateOrLocalHost(host) || isPrivateOrReservedIp(host)) {
+            val isTrustedPrivate = trust != null && trust.allowPrivateIpEndpoints && trust.isEndpointOriginTrusted(url)
+            if (!isTrustedPrivate) {
+                return ValidationResult.deny("Access to private/reserved IP addresses is blocked: $host")
+            }
+        }
+
+        val isExplicitlyTrusted = trust != null && trust.isEndpointOriginTrusted(url)
+        if (!isExplicitlyTrusted && allowedDomains.isNotEmpty() && host !in allowedDomains && !allowedDomains.any { host.endsWith(".$it") }) {
+            return ValidationResult.deny("Domain '$host' is not in allowed domains list")
         }
 
         val currentCount = requestCount.getOrDefault(workflowId, 0)
@@ -59,6 +77,26 @@ class RemoteRequestPolicy(
     fun validateRedirect(originalUrl: String, redirectUrl: String, workflowId: String): ValidationResult {
         if (!allowRedirects) {
             return ValidationResult.deny("Redirects are not allowed")
+        }
+
+        val originalProto = try { URL(originalUrl).protocol.lowercase() } catch (e: Exception) { "" }
+        val redirectProto = try { URL(redirectUrl).protocol.lowercase() } catch (e: Exception) { "" }
+
+        if (originalProto == "https" && redirectProto == "http") {
+            return ValidationResult.deny("Insecure redirect downgrade from HTTPS to HTTP is blocked")
+        }
+
+        val originalOrigin = RemoteSourceTrust.parseOrigin(originalUrl)?.origin
+        val redirectOrigin = RemoteSourceTrust.parseOrigin(redirectUrl)?.origin
+        if (originalOrigin != null && redirectOrigin != null && !originalOrigin.equals(redirectOrigin, ignoreCase = true)) {
+            val redirectHost = try { URL(redirectUrl).host.lowercase() } catch (e: Exception) { "" }
+            val isRedirectPrivate = RemoteSourceTrust.isPrivateOrLocalHost(redirectHost)
+            if (redirectProto == "http" || isRedirectPrivate) {
+                val isTrusted = trust != null && trust.isEndpointOriginTrusted(redirectUrl)
+                if (!isTrusted) {
+                    return ValidationResult.deny("Cross-origin redirect to unapproved destination is blocked: $redirectUrl")
+                }
+            }
         }
 
         val redirectValidation = validateRequest(redirectUrl, workflowId)
@@ -133,7 +171,10 @@ class RemoteRequestPolicy(
     )
 
     companion object {
-        fun fromSecurityConfig(config: SecurityConfig): RemoteRequestPolicy {
+        fun fromSecurityConfig(
+            config: SecurityConfig,
+            trust: RemoteSourceTrust? = null,
+        ): RemoteRequestPolicy {
             return RemoteRequestPolicy(
                 allowedDomains = config.allowedDomains.toSet(),
                 maxResponseBytes = config.maxResponseBytes,
@@ -143,6 +184,7 @@ class RemoteRequestPolicy(
                 totalTimeoutMs = config.totalTimeoutMs,
                 allowRedirects = config.allowRedirects,
                 maxRedirects = config.maxRedirects,
+                trust = trust,
             )
         }
     }

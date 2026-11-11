@@ -40,8 +40,12 @@ class RemoteProviderManager(
         }
     }
 
-    suspend fun addCustomSource(configUrl: String): AddSourceResult {
-        return fetcher.manualUpdate(configUrl).let { fetchResult ->
+    suspend fun previewCustomSource(configUrl: String, trust: RemoteSourceTrust? = null): ConfigPreviewResult {
+        return fetcher.previewConfig(configUrl, trust)
+    }
+
+    suspend fun addCustomSource(configUrl: String, trust: RemoteSourceTrust? = null): AddSourceResult {
+        return fetcher.fetchAndUpdate(configUrl, forceRefresh = true, trust = trust).let { fetchResult ->
             if (fetchResult.success) {
                 registry.refreshFromStore()
                 AddSourceResult.success(
@@ -55,17 +59,30 @@ class RemoteProviderManager(
         }
     }
 
-    suspend fun removeCustomSource(): RemoveSourceResult {
+    suspend fun removeCustomSource(revokeTrust: Boolean = true): RemoveSourceResult {
         val current = configStore.getCurrentConfig()
         val rollbackResult = configStore.rollbackToLastKnownGood()
 
+        if (revokeTrust) {
+            configStore.clearConfig()
+        }
+
+        registry.refreshFromStore()
         return if (rollbackResult.success) {
-            registry.refreshFromStore()
             RemoveSourceResult.success(previousConfig = rollbackResult.previousConfig)
         } else {
-            RemoveSourceResult.failure(rollbackResult.error ?: "Rollback failed")
+            // Even if rollback wasn't needed, removing the custom source is considered success
+            RemoveSourceResult.success(previousConfig = current)
         }
     }
+
+    suspend fun revokeTrust(): Boolean {
+        val cleared = configStore.clearConfig()
+        registry.refreshFromStore()
+        return cleared
+    }
+
+    fun getTrust(): RemoteSourceTrust? = configStore.getTrust()
 
     fun scheduleAutomaticUpdates(configUrl: String, intervalHours: Long = 24) {
         RemoteConfigUpdateWorker.schedulePeriodicUpdate(appContext, configUrl, intervalHours)

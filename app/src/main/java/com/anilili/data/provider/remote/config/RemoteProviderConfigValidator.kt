@@ -25,15 +25,19 @@ open class RemoteProviderConfigValidator(
         }
     }
 
-    fun validate(config: RemoteProviderConfig, originalUrl: String): ValidationResult {
+    fun validate(
+        config: RemoteProviderConfig,
+        originalUrl: String,
+        trust: RemoteSourceTrust? = null,
+    ): ValidationResult {
         val errors = mutableListOf<String>()
         val warnings = mutableListOf<String>()
 
         validateSchemaVersion(config.schemaVersion, errors, warnings)
-        validateMetadata(config.metadata, originalUrl, errors, warnings)
-        validateProviders(config.providers, errors, warnings)
+        validateMetadata(config.metadata, originalUrl, trust, errors, warnings)
+        validateProviders(config.providers, trust, errors, warnings)
         validateDuplicateIds(config.providers, errors)
-        validateSecurity(config, originalUrl, errors, warnings)
+        validateSecurity(config, originalUrl, trust, errors, warnings)
 
         return if (errors.isEmpty()) {
             ValidationResult.success(warnings)
@@ -52,7 +56,13 @@ open class RemoteProviderConfigValidator(
         }
     }
 
-    private fun validateMetadata(metadata: ConfigMetadata, originalUrl: String, errors: MutableList<String>, warnings: MutableList<String>) {
+    private fun validateMetadata(
+        metadata: ConfigMetadata,
+        originalUrl: String,
+        trust: RemoteSourceTrust?,
+        errors: MutableList<String>,
+        warnings: MutableList<String>,
+    ) {
         if (metadata.name.isBlank()) {
             errors.add("Metadata name is required")
         }
@@ -62,7 +72,10 @@ open class RemoteProviderConfigValidator(
         if (metadata.sourceUrl.isBlank()) {
             errors.add("Metadata sourceUrl is required")
         } else if (!isHttpsUrl(metadata.sourceUrl)) {
-            errors.add("Metadata sourceUrl must use HTTPS: ${metadata.sourceUrl}")
+            val isTrustedHttp = trust != null && trust.allowHttpConfig && trust.isConfigFetchAllowed(metadata.sourceUrl)
+            if (!isTrustedHttp) {
+                errors.add("Metadata sourceUrl must use HTTPS: ${metadata.sourceUrl}")
+            }
         } else if (!urlsMatch(metadata.sourceUrl, originalUrl)) {
             warnings.add("Metadata sourceUrl (${metadata.sourceUrl}) differs from fetch URL ($originalUrl); preserving original fetch URL")
         }
@@ -74,7 +87,12 @@ open class RemoteProviderConfigValidator(
         }
     }
 
-    private fun validateProviders(providers: List<RemoteProviderEntry>, errors: MutableList<String>, warnings: MutableList<String>) {
+    private fun validateProviders(
+        providers: List<RemoteProviderEntry>,
+        trust: RemoteSourceTrust?,
+        errors: MutableList<String>,
+        warnings: MutableList<String>,
+    ) {
         if (providers.isEmpty()) {
             warnings.add("No providers defined in config")
         }
@@ -83,11 +101,17 @@ open class RemoteProviderConfigValidator(
         }
 
         providers.forEachIndexed { index, provider ->
-            validateProvider(provider, index, errors, warnings)
+            validateProvider(provider, index, trust, errors, warnings)
         }
     }
 
-    private fun validateProvider(provider: RemoteProviderEntry, index: Int, errors: MutableList<String>, warnings: MutableList<String>) {
+    private fun validateProvider(
+        provider: RemoteProviderEntry,
+        index: Int,
+        trust: RemoteSourceTrust?,
+        errors: MutableList<String>,
+        warnings: MutableList<String>,
+    ) {
         val prefix = "Provider[$index]"
 
         if (provider.id.isBlank()) {
@@ -107,7 +131,10 @@ open class RemoteProviderConfigValidator(
         if (provider.endpoint.isBlank()) {
             errors.add("$prefix: endpoint is required")
         } else if (!isHttpsUrl(provider.endpoint)) {
-            errors.add("$prefix: endpoint must use HTTPS: ${provider.endpoint}")
+            val isTrustedHttp = trust != null && trust.allowHttpEndpoints && trust.isEndpointOriginTrusted(provider.endpoint)
+            if (!isTrustedHttp) {
+                errors.add("$prefix: endpoint must use HTTPS: ${provider.endpoint}")
+            }
         } else if (provider.endpoint.length > maxEndpointLength) {
             errors.add("$prefix: endpoint exceeds maximum length of $maxEndpointLength")
         } else {
@@ -156,7 +183,13 @@ open class RemoteProviderConfigValidator(
         }
     }
 
-    private fun validateSecurity(config: RemoteProviderConfig, originalUrl: String, errors: MutableList<String>, warnings: MutableList<String>) {
+    private fun validateSecurity(
+        config: RemoteProviderConfig,
+        originalUrl: String,
+        trust: RemoteSourceTrust?,
+        errors: MutableList<String>,
+        warnings: MutableList<String>,
+    ) {
         if (allowedOrigins.isNotEmpty()) {
             val urlOrigin = getOrigin(originalUrl)
             val urlHost = getHost(originalUrl)
@@ -173,13 +206,18 @@ open class RemoteProviderConfigValidator(
             if (allowedDomains.isNotEmpty() && endpointHost !in allowedDomains && !allowedDomains.any { endpointHost.endsWith(".$it") }) {
                 warnings.add("Provider '${provider.id}' endpoint origin '$endpointHost' not in allowed origins")
             }
-            if (provider.endpoint.contains("localhost", ignoreCase = true) || provider.endpoint.contains("127.0.0.1")) {
-                errors.add("Provider '${provider.id}' endpoint points to localhost; not allowed")
+            if (RemoteSourceTrust.isLoopbackHost(endpointHost) || provider.endpoint.contains("localhost", ignoreCase = true) || provider.endpoint.contains("127.0.0.1") || provider.endpoint.contains("::1")) {
+                errors.add("Provider '${provider.id}' endpoint points to loopback address; strictly prohibited")
             }
-            // Private IP check is now done at runtime via DNS resolution in RemoteRequestPolicy
-            // String-based check here is just a warning
-            if (provider.endpoint.contains("10.", ignoreCase = true) || provider.endpoint.contains("192.168.", ignoreCase = true) || provider.endpoint.contains("172.16.", ignoreCase = true)) {
-                warnings.add("Provider '${provider.id}' endpoint may point to private IP range (will be validated at runtime via DNS)")
+
+            val isPrivate = RemoteSourceTrust.isPrivateOrLocalHost(endpointHost)
+            if (isPrivate) {
+                val isTrusted = trust != null && trust.allowPrivateIpEndpoints && trust.isEndpointOriginTrusted(provider.endpoint)
+                if (!isTrusted) {
+                    errors.add("Provider '${provider.id}' endpoint points to private IP/LAN without explicit endpoint trust: $endpointHost")
+                } else {
+                    warnings.add("Provider '${provider.id}' endpoint approved for private IP/LAN: $endpointHost")
+                }
             }
         }
     }

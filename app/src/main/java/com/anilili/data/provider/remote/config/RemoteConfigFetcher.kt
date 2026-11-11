@@ -51,10 +51,34 @@ class RemoteConfigFetcher(
             .build()
     }
 
-    suspend fun fetchAndUpdate(configUrl: String, forceRefresh: Boolean = false): FetchResult {
+    suspend fun fetchAndUpdate(
+        configUrl: String,
+        forceRefresh: Boolean = false,
+        trust: RemoteSourceTrust? = null,
+    ): FetchResult {
         return withContext(Dispatchers.IO) {
-            if (!isHttpsUrl(configUrl)) {
-                return@withContext FetchResult.failure("Config URL must use HTTPS: $configUrl")
+            val activeTrust = trust ?: store.getTrust()
+            val parsedOrigin = RemoteSourceTrust.parseOrigin(configUrl)
+                ?: return@withContext FetchResult.failure("Invalid config URL format: $configUrl")
+
+            if (parsedOrigin.isLoopback) {
+                return@withContext FetchResult.failure("Loopback addresses are strictly forbidden: $configUrl")
+            }
+
+            if (parsedOrigin.protocol == "http") {
+                val isTrustedHttp = activeTrust != null && activeTrust.allowHttpConfig && activeTrust.isConfigFetchAllowed(configUrl)
+                if (!isTrustedHttp) {
+                    return@withContext FetchResult.failure("Config URL requires explicit user trust for HTTP: $configUrl")
+                }
+            } else if (parsedOrigin.protocol == "https") {
+                if (parsedOrigin.isPrivateOrLocal) {
+                    val isTrustedPrivate = activeTrust != null && activeTrust.allowPrivateIpConfig
+                    if (!isTrustedPrivate) {
+                        return@withContext FetchResult.failure("Local network HTTPS source requires explicit user trust: $configUrl")
+                    }
+                }
+            } else {
+                return@withContext FetchResult.failure("Only HTTP and HTTPS protocols are supported: $configUrl")
             }
 
             val request = Request.Builder()
@@ -91,7 +115,7 @@ class RemoteConfigFetcher(
                 .getOrNull()
                 ?: return@withContext FetchResult.failure("Invalid JSON format")
 
-            val updateResult = store.updateConfig(config, configUrl, etag, lastModified)
+            val updateResult = store.updateConfig(config, configUrl, etag, lastModified, trust = activeTrust)
 
             if (updateResult.success) {
                 FetchResult.success(
@@ -105,8 +129,94 @@ class RemoteConfigFetcher(
         }
     }
 
-    suspend fun manualUpdate(configUrl: String): FetchResult {
-        return fetchAndUpdate(configUrl, forceRefresh = true)
+    suspend fun previewConfig(
+        configUrl: String,
+        trust: RemoteSourceTrust? = null,
+    ): ConfigPreviewResult {
+        return withContext(Dispatchers.IO) {
+            val parsedOrigin = RemoteSourceTrust.parseOrigin(configUrl)
+                ?: return@withContext ConfigPreviewResult.failure("Invalid config URL format: $configUrl")
+
+            if (parsedOrigin.isLoopback) {
+                return@withContext ConfigPreviewResult.failure("Loopback addresses are strictly forbidden: $configUrl", isLoopback = true)
+            }
+
+            val isHttp = parsedOrigin.protocol == "http"
+            val isPrivate = parsedOrigin.isPrivateOrLocal
+
+            val activeTrust = trust ?: store.getTrust()
+            val isTrusted = if (isHttp) {
+                activeTrust != null && activeTrust.allowHttpConfig && activeTrust.isConfigFetchAllowed(configUrl)
+            } else if (isPrivate) {
+                activeTrust != null && activeTrust.allowPrivateIpConfig
+            } else {
+                true // Public HTTPS
+            }
+
+            if (!isTrusted) {
+                return@withContext ConfigPreviewResult.requiresApproval(
+                    targetOrigin = parsedOrigin.origin,
+                    targetHost = parsedOrigin.host,
+                    targetPort = parsedOrigin.port,
+                    requiresHttpConfig = isHttp,
+                    requiresPrivateIpConfig = isPrivate,
+                )
+            }
+
+            val request = Request.Builder()
+                .url(configUrl)
+                .addHeader("Accept", "application/json")
+                .addHeader("User-Agent", "Anilili/${AppGraph.isReady?.let { "v${BuildConfig.VERSION_NAME}" } ?: "unknown"}")
+                .build()
+
+            val response = runCatching { client.newCall(request).execute() }
+                .onFailure { DiagnosticsLog.throwable("Remote config preview fetch failed for $configUrl", it) }
+                .getOrNull()
+                ?: return@withContext ConfigPreviewResult.failure("Network request failed")
+
+            val responseBody = response.body?.use { it.string() }
+                ?: return@withContext ConfigPreviewResult.failure("Empty response")
+
+            if (!response.isSuccessful) {
+                return@withContext ConfigPreviewResult.failure("HTTP ${response.code}: ${response.message}")
+            }
+
+            val config = runCatching { json.decodeFromString<RemoteProviderConfig>(RemoteProviderConfig.serializer(), responseBody) }
+                .onFailure { DiagnosticsLog.throwable("Remote config preview JSON parse failed", it) }
+                .getOrNull()
+                ?: return@withContext ConfigPreviewResult.failure("Invalid JSON format")
+
+            val validation = validator.validate(config, configUrl, activeTrust)
+            if (!validation.isValid) {
+                return@withContext ConfigPreviewResult.failure("Validation failed: ${validation.errors.joinToString("; ")}")
+            }
+
+            val discoveredHttpEndpoints = mutableListOf<String>()
+            val discoveredPrivateIpEndpoints = mutableListOf<String>()
+
+            config.providers.forEach { provider ->
+                val epOrigin = RemoteSourceTrust.parseOrigin(provider.endpoint)
+                if (epOrigin != null) {
+                    if (epOrigin.protocol == "http") {
+                        discoveredHttpEndpoints.add(epOrigin.origin)
+                    }
+                    if (epOrigin.isPrivateOrLocal) {
+                        discoveredPrivateIpEndpoints.add(epOrigin.origin)
+                    }
+                }
+            }
+
+            ConfigPreviewResult.success(
+                config = config,
+                warnings = validation.warnings,
+                discoveredHttpEndpoints = discoveredHttpEndpoints.distinct(),
+                discoveredPrivateIpEndpoints = discoveredPrivateIpEndpoints.distinct(),
+            )
+        }
+    }
+
+    suspend fun manualUpdate(configUrl: String, trust: RemoteSourceTrust? = null): FetchResult {
+        return fetchAndUpdate(configUrl, forceRefresh = true, trust = trust)
     }
 
     private fun isHttpsUrl(url: String): Boolean {
@@ -222,5 +332,54 @@ data class FetchResult(
         )
         fun failure(error: String, isRetryable: Boolean = false) = FetchResult(false, error, isRetryable)
         fun unchanged(message: String) = FetchResult(true, message = message)
+    }
+}
+
+data class ConfigPreviewResult(
+    val success: Boolean,
+    val config: RemoteProviderConfig? = null,
+    val error: String? = null,
+    val warnings: List<String> = emptyList(),
+    val requiresHttpConfig: Boolean = false,
+    val requiresPrivateIpConfig: Boolean = false,
+    val isLoopback: Boolean = false,
+    val targetOrigin: String? = null,
+    val targetHost: String? = null,
+    val targetPort: Int = -1,
+    val discoveredHttpEndpoints: List<String> = emptyList(),
+    val discoveredPrivateIpEndpoints: List<String> = emptyList(),
+) {
+    companion object {
+        fun success(
+            config: RemoteProviderConfig,
+            warnings: List<String> = emptyList(),
+            discoveredHttpEndpoints: List<String> = emptyList(),
+            discoveredPrivateIpEndpoints: List<String> = emptyList(),
+        ) = ConfigPreviewResult(
+            success = true,
+            config = config,
+            warnings = warnings,
+            discoveredHttpEndpoints = discoveredHttpEndpoints,
+            discoveredPrivateIpEndpoints = discoveredPrivateIpEndpoints,
+        )
+
+        fun requiresApproval(
+            targetOrigin: String,
+            targetHost: String,
+            targetPort: Int,
+            requiresHttpConfig: Boolean,
+            requiresPrivateIpConfig: Boolean,
+        ) = ConfigPreviewResult(
+            success = false,
+            requiresHttpConfig = requiresHttpConfig,
+            requiresPrivateIpConfig = requiresPrivateIpConfig,
+            targetOrigin = targetOrigin,
+            targetHost = targetHost,
+            targetPort = targetPort,
+            error = "Explicit user trust required before fetching this source",
+        )
+
+        fun failure(error: String, isLoopback: Boolean = false) =
+            ConfigPreviewResult(success = false, error = error, isLoopback = isLoopback)
     }
 }

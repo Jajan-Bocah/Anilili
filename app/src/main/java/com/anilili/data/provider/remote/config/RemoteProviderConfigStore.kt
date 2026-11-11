@@ -35,11 +35,15 @@ class RemoteProviderConfigStore(
     private val currentConfigRef = AtomicReference<RemoteProviderList?>(null)
     private val lastKnownGoodRef = AtomicReference<RemoteProviderList?>(null)
     private val configOriginUrlRef = AtomicReference<String?>(null)
+    private val trustRef = AtomicReference<RemoteSourceTrust?>(null)
+    private val lastKnownGoodTrustRef = AtomicReference<RemoteSourceTrust?>(null)
 
     private val currentFile = File(storeDirectory, CURRENT_FILE_NAME)
     private val backupFile = File(storeDirectory, BACKUP_FILE_NAME)
     private val originUrlFile = File(storeDirectory, ORIGIN_URL_FILE_NAME)
     private val lastKnownGoodFile = File(storeDirectory, LKG_FILE_NAME)
+    private val trustFile = File(storeDirectory, TRUST_FILE_NAME)
+    private val lastKnownGoodTrustFile = File(storeDirectory, LKG_TRUST_FILE_NAME)
 
     init {
         scope.launch {
@@ -53,6 +57,8 @@ class RemoteProviderConfigStore(
 
     fun getConfigOriginUrl(): String? = configOriginUrlRef.get()
 
+    fun getTrust(): RemoteSourceTrust? = trustRef.get()
+
     fun hasConfig(): Boolean = currentConfigRef.get() != null
 
     suspend fun updateConfig(
@@ -60,10 +66,11 @@ class RemoteProviderConfigStore(
         originalUrl: String,
         etag: String? = null,
         lastModified: String? = null,
+        trust: RemoteSourceTrust? = null,
     ): UpdateResult {
         return withContext(Dispatchers.IO) {
             writeLock.withLock {
-                val validation = validator.validate(config, originalUrl)
+                val validation = validator.validate(config, originalUrl, trust)
                 if (!validation.isValid) {
                     return@withLock UpdateResult.failure(validation.errors)
                 }
@@ -80,17 +87,20 @@ class RemoteProviderConfigStore(
                     lastModified = lastModified,
                 )
 
-                val writeResult = writeToDisk(newList, previousConfig, previousLkg, previousOriginUrl)
+                val writeResult = writeToDisk(newList, previousConfig, previousLkg, previousOriginUrl, trust)
                 if (!writeResult.success) {
                     return@withLock UpdateResult.failure(writeResult.errors)
                 }
 
                 currentConfigRef.set(newList)
                 configOriginUrlRef.set(originalUrl)
+                trustRef.set(trust)
 
                 if (previousConfig == null) {
                     lastKnownGoodRef.set(newList)
+                    lastKnownGoodTrustRef.set(trust)
                     writeLastKnownGood(newList)
+                    writeLastKnownGoodTrust(trust)
                 }
 
                 return@withLock UpdateResult.success(
@@ -105,14 +115,16 @@ class RemoteProviderConfigStore(
         return withContext(Dispatchers.IO) {
             writeLock.withLock {
                 val lkg = lastKnownGoodRef.get() ?: return@withLock RollbackResult.failure("No last-known-good config available")
+                val lkgTrust = lastKnownGoodTrustRef.get()
                 val current = currentConfigRef.get()
 
-                val writeResult = writeToDisk(lkg, current, lkg, configOriginUrlRef.get())
+                val writeResult = writeToDisk(lkg, current, lkg, configOriginUrlRef.get(), lkgTrust)
                 if (!writeResult.success) {
                     return@withLock RollbackResult.failure(writeResult.errors.firstOrNull() ?: "Write failed")
                 }
 
                 currentConfigRef.set(lkg)
+                trustRef.set(lkgTrust)
                 return@withLock RollbackResult.success(previousConfig = current)
             }
         }
@@ -123,11 +135,19 @@ class RemoteProviderConfigStore(
             writeLock.withLock {
                 currentConfigRef.set(null)
                 configOriginUrlRef.set(null)
+                trustRef.set(null)
+                lastKnownGoodTrustRef.set(null)
                 currentFile.delete()
                 originUrlFile.delete()
+                trustFile.delete()
+                lastKnownGoodTrustFile.delete()
                 true
             }
         }
+    }
+
+    suspend fun revokeTrust(): Boolean {
+        return clearConfig()
     }
 
     private suspend fun readCurrent(): RemoteProviderList? {
@@ -157,15 +177,38 @@ class RemoteProviderConfigStore(
         }.getOrNull()
     }
 
+    private suspend fun readTrust(): RemoteSourceTrust? {
+        return readTrustFile(trustFile)
+    }
+
+    private suspend fun readLastKnownGoodTrust(): RemoteSourceTrust? {
+        return readTrustFile(lastKnownGoodTrustFile)
+    }
+
+    private fun readTrustFile(file: File): RemoteSourceTrust? {
+        if (!file.isFile) return null
+        return runCatching {
+            FileInputStream(file).use { input ->
+                json.decodeFromString<RemoteSourceTrust>(RemoteSourceTrust.serializer(), input.readBytes().decodeToString())
+            }
+        }.onFailure {
+            DiagnosticsLog.throwable("RemoteProviderConfigStore trust read failed: ${file.name}", it)
+            file.delete()
+        }.getOrNull()
+    }
+
     private suspend fun writeToDisk(
         newList: RemoteProviderList,
         previousConfig: RemoteProviderList?,
         previousLkg: RemoteProviderList?,
         previousOriginUrl: String?,
+        trust: RemoteSourceTrust? = null,
     ): WriteResult {
         val tempCurrent = File(storeDirectory, ".${CURRENT_FILE_NAME}.${System.nanoTime()}.tmp")
         val tempOrigin = File(storeDirectory, ".${ORIGIN_URL_FILE_NAME}.${System.nanoTime()}.tmp")
         val tempLkg = File(storeDirectory, ".${LKG_FILE_NAME}.${System.nanoTime()}.tmp")
+        val tempTrust = File(storeDirectory, ".${TRUST_FILE_NAME}.${System.nanoTime()}.tmp")
+        val tempLkgTrust = File(storeDirectory, ".${LKG_TRUST_FILE_NAME}.${System.nanoTime()}.tmp")
 
         try {
             writeFile(tempCurrent, newList)
@@ -175,10 +218,26 @@ class RemoteProviderConfigStore(
                 writeFile(tempLkg, newList)
             }
 
+            if (trust != null) {
+                writeFile(tempTrust, trust)
+                if (previousLkg == null) {
+                    writeFile(tempLkgTrust, trust)
+                }
+            }
+
             atomicReplace(tempCurrent, currentFile)
             atomicReplace(tempOrigin, originUrlFile)
             if (previousLkg == null) {
                 atomicReplace(tempLkg, lastKnownGoodFile)
+            }
+
+            if (trust != null) {
+                atomicReplace(tempTrust, trustFile)
+                if (previousLkg == null) {
+                    atomicReplace(tempLkgTrust, lastKnownGoodTrustFile)
+                }
+            } else {
+                trustFile.delete()
             }
 
             return WriteResult.success()
@@ -186,7 +245,24 @@ class RemoteProviderConfigStore(
             tempCurrent.delete()
             tempOrigin.delete()
             tempLkg.delete()
+            tempTrust.delete()
+            tempLkgTrust.delete()
             return WriteResult.failure("Write failed: ${e.message}")
+        }
+    }
+
+    private suspend fun writeLastKnownGoodTrust(trust: RemoteSourceTrust?) {
+        if (trust == null) {
+            lastKnownGoodTrustFile.delete()
+            return
+        }
+        val temp = File(storeDirectory, ".${LKG_TRUST_FILE_NAME}.${System.nanoTime()}.tmp")
+        try {
+            writeFile(temp, trust)
+            atomicReplace(temp, lastKnownGoodTrustFile)
+        } catch (e: Exception) {
+            temp.delete()
+            throw e
         }
     }
 
@@ -217,8 +293,9 @@ class RemoteProviderConfigStore(
         FileOutputStream(file).use { output ->
             val jsonString = when (data) {
                 is RemoteProviderList -> json.encodeToString(RemoteProviderList.serializer(), data)
+                is RemoteSourceTrust -> json.encodeToString(RemoteSourceTrust.serializer(), data)
                 is String -> data
-                else -> throw IllegalArgumentException("Unsupported data type")
+                else -> throw IllegalArgumentException("Unsupported data type: ${data.javaClass.name}")
             }
             output.write(jsonString.toByteArray(StandardCharsets.UTF_8))
             output.flush()
@@ -240,19 +317,26 @@ class RemoteProviderConfigStore(
         const val BACKUP_FILE_NAME = "backup.json"
         const val LKG_FILE_NAME = "last-known-good.json"
         const val ORIGIN_URL_FILE_NAME = "origin-url.txt"
+        const val TRUST_FILE_NAME = "source-trust.json"
+        const val LKG_TRUST_FILE_NAME = "last-known-good-trust.json"
     }
 
     private suspend fun loadFromDisk() {
         val current = readCurrent()
         val lkg = readLastKnownGood()
         val originUrl = readOriginUrl()
+        val trust = readTrust()
+        val lkgTrust = readLastKnownGoodTrust()
 
         currentConfigRef.set(current)
         lastKnownGoodRef.set(lkg ?: current)
         configOriginUrlRef.set(originUrl)
+        trustRef.set(trust)
+        lastKnownGoodTrustRef.set(lkgTrust ?: trust)
 
         if (current != null && lkg == null) {
             writeLastKnownGood(current)
+            writeLastKnownGoodTrust(trust)
         }
     }
 }

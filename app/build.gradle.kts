@@ -88,7 +88,11 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("release")
-            manifestPlaceholders["usesCleartextTraffic"] = "false"
+            // P9: Android cleartext traffic policy is not dynamically scoped per arbitrary
+            // user-entered domain at runtime. Setting this to "true" grants platform socket permission,
+            // while strict application-level allowlisting (RemoteRequestPolicy, RemoteConfigFetcher,
+            // RemoteProviderConfigValidator) guards every cleartext request behind explicit user trust.
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

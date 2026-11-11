@@ -38,9 +38,10 @@ class UnifiedProviderRegistry(
                 val runtimes = mutableListOf<Any>()
 
                 val factory = RemoteProviderRuntimeFactory(okHttpClient, json)
+                val trust = remoteConfigStore.getTrust()
 
                 providers.forEach { entry ->
-                    val runtime = factory.createRuntime(entry, config.config!!)
+                    val runtime = factory.createRuntime(entry, config.config!!, trust)
                     if (runtime != null) {
                         runtimes.add(runtime)
                     } else {

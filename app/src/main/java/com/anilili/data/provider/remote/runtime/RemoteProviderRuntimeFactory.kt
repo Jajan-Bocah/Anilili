@@ -2,6 +2,7 @@ package com.anilili.data.provider.remote.runtime
 
 import com.anilili.data.provider.remote.config.RemoteProviderConfig
 import com.anilili.data.provider.remote.config.RemoteProviderEntry
+import com.anilili.data.provider.remote.config.RemoteSourceTrust
 import com.anilili.data.provider.remote.engine.security.RemoteRequestPolicy
 import com.anilili.data.provider.remote.engine.security.RemoteRequestPolicy.SecurityConfig
 import com.anilili.data.provider.remote.engine.workflow.WorkflowDefinition
@@ -15,8 +16,15 @@ class RemoteProviderRuntimeFactory(
     private val json: Json,
 ) {
 
-    fun createRuntime(entry: RemoteProviderEntry, config: RemoteProviderConfig): WorkflowRemoteProviderRuntime? {
-        val requestPolicy = RemoteRequestPolicy.fromSecurityConfig(config.security ?: SecurityConfig())
+    fun createRuntime(
+        entry: RemoteProviderEntry,
+        config: RemoteProviderConfig,
+        trust: RemoteSourceTrust? = null,
+    ): WorkflowRemoteProviderRuntime? {
+        val requestPolicy = RemoteRequestPolicy.fromSecurityConfig(
+            config = config.security ?: SecurityConfig(),
+            trust = trust,
+        )
         val workflows = parseWorkflows(entry, config)
 
         if (workflows.isEmpty()) {
