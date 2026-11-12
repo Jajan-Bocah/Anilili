@@ -140,13 +140,9 @@ object AppGraph {
         DubIndex.refresh(context, konoha)
         com.anilili.data.recs.Recommendations.attach(context, httpClient, konoha)
 
-        remoteProviderManager = RemoteProviderManager(context, httpClient, json).also { it.init() }
-
-        providerRegistry = UnifiedProviderRegistry(
-            remoteConfigStore = remoteProviderManager.configStore,
-            okHttpClient = httpClient,
-            json = json,
-        )
+        remoteProviderManager = RemoteProviderManager(context, httpClient, json)
+        providerRegistry = remoteProviderManager.registry
+        remoteProviderManager.init()
 
         repository = MiruroRepository(
             tmdb = TmdbClient(httpClient, json, cache, BuildConfig.TMDB_READ_TOKEN),

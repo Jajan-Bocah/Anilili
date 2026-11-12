@@ -5,6 +5,7 @@ import com.anilili.data.model.Category
 import com.anilili.data.model.SourceVariant
 import com.anilili.data.provider.remote.config.RemoteProviderConfig
 import com.anilili.data.provider.remote.config.RemoteProviderConfigStore
+import com.anilili.data.provider.remote.config.RemoteProviderEntry
 import com.anilili.data.provider.remote.config.RemoteProviderList
 import com.anilili.data.provider.remote.runtime.RemoteProviderRuntime
 import com.anilili.data.provider.remote.runtime.WorkflowRemoteProviderRuntime
@@ -30,40 +31,64 @@ class UnifiedProviderRegistry(
     private var cachedConfig: RemoteProviderList? = null
 
     suspend fun refreshFromStore() {
-        val config = remoteConfigStore.getCurrentConfig()
-        if (config != cachedConfig) {
-            cachedConfig = config
-            cachedRuntimes = if (config?.config != null) {
-                val providers = config.config.providers
-                val runtimes = mutableListOf<Any>()
+        val allConfigs = remoteConfigStore.getAllCurrentConfigs()
+        val allTrusts = remoteConfigStore.getAllTrusts()
 
-                val factory = RemoteProviderRuntimeFactory(okHttpClient, json)
-                val trust = remoteConfigStore.getTrust()
+        // Build merged config list across all enabled sources
+        val mergedProviders = mutableListOf<RemoteProviderEntry>()
+        var changed = false
 
-                providers.forEach { entry ->
-                    val runtime = factory.createRuntime(entry, config.config!!, trust)
-                    if (runtime != null) {
-                        runtimes.add(runtime)
-                    } else {
-                        // Fallback to basic runtime - skip for now
-                        DiagnosticsLog.event("UnifiedProviderRegistry: no workflow runtime for ${entry.id}, using direct provider")
-                    }
-                }
-
-                runtimes
-            } else {
-                emptyList()
-            }
-            DiagnosticsLog.event("UnifiedProviderRegistry refreshed: ${cachedRuntimes.size} remote providers")
+        allConfigs.entries.forEach { (sourceId, list) ->
+            if (!remoteConfigStore.isSourceEnabled(sourceId)) return@forEach
+            val config = list.config
+            if (config != cachedConfig?.config) changed = true
+            mergedProviders.addAll(config.providers)
         }
+
+        if (!changed && cachedRuntimes.isNotEmpty()) return
+
+        cachedConfig = RemoteProviderList(
+            config = RemoteProviderConfig(
+                schemaVersion = 1,
+                providers = mergedProviders,
+                metadata = cachedConfig?.config?.metadata ?: com.anilili.data.provider.remote.config.ConfigMetadata(
+                    name = "Merged Remote Sources",
+                    description = "Merged view of all enabled remote sources",
+                    author = "Anilili",
+                    version = "1.0",
+                    sourceUrl = "",
+                    fetchedAt = System.currentTimeMillis(),
+                    checksum = null,
+                ),
+                security = null,
+            ),
+            originalUrl = "merged://sources",
+            fetchedAt = System.currentTimeMillis(),
+        )
+
+        val runtimes = mutableListOf<Any>()
+        val factory = RemoteProviderRuntimeFactory(okHttpClient, json)
+        val sourceTrust = allTrusts.values.firstOrNull { it != null }
+
+        mergedProviders.forEach { entry ->
+            val runtime = factory.createRuntime(entry, cachedConfig!!.config, sourceTrust)
+            if (runtime != null) {
+                runtimes.add(runtime)
+            } else {
+                DiagnosticsLog.event("UnifiedProviderRegistry: no workflow runtime for ${entry.id}, using direct provider")
+            }
+        }
+
+        cachedRuntimes = runtimes
+        DiagnosticsLog.event("UnifiedProviderRegistry refreshed: ${cachedRuntimes.size} remote providers from ${allConfigs.size} sources")
     }
 
-    private suspend fun getRemoteRuntimes(): List<RemoteProviderRuntime> {
+    suspend fun getRemoteRuntimes(): List<RemoteProviderRuntime> {
         refreshFromStore()
         return cachedRuntimes.filterIsInstance<RemoteProviderRuntime>()
     }
 
-    private suspend fun getWorkflowRuntimes(): List<WorkflowRemoteProviderRuntime> {
+    suspend fun getWorkflowRuntimes(): List<WorkflowRemoteProviderRuntime> {
         refreshFromStore()
         return cachedRuntimes.filterIsInstance<WorkflowRemoteProviderRuntime>()
     }
@@ -355,6 +380,26 @@ class UnifiedProviderRegistry(
             }
         }
         return ProviderCatalog.unpublishedSubtitleVariant(providerId, category)
+    }
+
+    // Non-suspend accessors for Compose UI — reads cached state without refresh.
+    // The init/add/remove flow already calls refreshFromStore().
+
+    /** Cached remote provider IDs, safe to call from Compose without suspend. */
+    fun cachedRemoteProviderIds(): List<String> =
+        cachedRuntimes.filterIsInstance<RemoteProviderRuntime>().map { it.entry.id }
+
+    /** Label for a provider, reading the cache. Falls back to ProviderCatalog for built-ins. */
+    fun cachedLabel(providerId: String): String =
+        cachedRuntimes.filterIsInstance<RemoteProviderRuntime>()
+            .firstOrNull { it.entry.id == providerId }?.entry?.name
+            ?: ProviderCatalog.label(providerId)
+
+    /** Whether a provider is fast, reading the cache. */
+    fun cachedIsFast(providerId: String): Boolean {
+        val remote = cachedRuntimes.filterIsInstance<RemoteProviderRuntime>()
+            .firstOrNull { it.entry.id == providerId }
+        return if (remote != null) remote.entry.priority > 0 else ProviderCatalog.isFast(providerId)
     }
 
     fun shutdown() {

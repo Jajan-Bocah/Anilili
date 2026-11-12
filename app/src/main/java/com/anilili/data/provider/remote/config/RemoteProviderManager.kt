@@ -10,7 +10,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import java.security.MessageDigest
 import okhttp3.OkHttpClient
 
 class RemoteProviderManager(
@@ -18,13 +20,14 @@ class RemoteProviderManager(
     private val okHttpClient: OkHttpClient = OkHttpClient(),
     private val json: Json = Json { ignoreUnknownKeys = true; isLenient = true; coerceInputValues = true },
     private val validator: RemoteProviderConfigValidator = RemoteProviderConfigValidator.DEFAULT,
+    customRegistry: UnifiedProviderRegistry? = null,
 ) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val configStore = RemoteProviderConfigStore(appContext, json, validator)
     val fetcher = RemoteConfigFetcher(appContext, configStore, validator, json, okHttpClient)
-    val registry = UnifiedProviderRegistry(configStore, okHttpClient, json)
+    val registry: UnifiedProviderRegistry = customRegistry ?: UnifiedProviderRegistry(configStore, okHttpClient, json)
 
     var isInitialized = false
 
@@ -44,45 +47,89 @@ class RemoteProviderManager(
         return fetcher.previewConfig(configUrl, trust)
     }
 
+    /** Installs a single source. Generates a sourceId from the config URL. */
     suspend fun addCustomSource(configUrl: String, trust: RemoteSourceTrust? = null): AddSourceResult {
-        return fetcher.fetchAndUpdate(configUrl, forceRefresh = true, trust = trust).let { fetchResult ->
-            if (fetchResult.success) {
-                registry.refreshFromStore()
-                AddSourceResult.success(
-                    isFirstConfig = fetchResult.isFirstConfig,
-                    wasRollback = fetchResult.wasRollback,
-                    providerCount = fetchResult.providerCount,
-                )
-            } else {
-                AddSourceResult.failure(fetchResult.error ?: "Unknown error")
-            }
-        }
-    }
+        val sourceId = sourceIdFromUrl(configUrl)
+        val config = fetchConfig(configUrl, trust)
+            ?: return AddSourceResult.failure("Failed to fetch or parse config from $configUrl")
 
-    suspend fun removeCustomSource(revokeTrust: Boolean = true): RemoveSourceResult {
-        val current = configStore.getCurrentConfig()
-        val rollbackResult = configStore.rollbackToLastKnownGood()
-
-        if (revokeTrust) {
-            configStore.clearConfig()
-        }
-
-        registry.refreshFromStore()
-        return if (rollbackResult.success) {
-            RemoveSourceResult.success(previousConfig = rollbackResult.previousConfig)
+        val result = configStore.updateSource(
+            sourceId = sourceId,
+            config = config,
+            configUrl = configUrl,
+            trust = trust,
+        )
+        if (result.success) {
+            registry.refreshFromStore()
+            return AddSourceResult.success(
+                isFirstConfig = result.isFirstConfig,
+                wasRollback = result.wasRollback,
+                providerCount = config.providers.size,
+            )
         } else {
-            // Even if rollback wasn't needed, removing the custom source is considered success
-            RemoveSourceResult.success(previousConfig = current)
+            return AddSourceResult.failure(result.errors.joinToString("; "))
         }
     }
 
+    /** Removes a specific source by its sourceId. Backward compat: no args → removes "default". */
+    suspend fun removeCustomSource(sourceId: String = "default", revokeTrust: Boolean = true): RemoveSourceResult {
+        val current = configStore.getSourceConfig(sourceId)
+        if (revokeTrust) {
+            configStore.revokeSourceTrust(sourceId)
+        }
+        val removed = configStore.removeSource(sourceId)
+        registry.refreshFromStore()
+        return RemoveSourceResult.success(previousConfig = current)
+    }
+
+    /** Legacy full clear: removes all sources and clears the tombstone. */
     suspend fun revokeTrust(): Boolean {
         val cleared = configStore.clearConfig()
         registry.refreshFromStore()
         return cleared
     }
 
+    /** Updates a single installed source by re-fetching its config URL. */
+    suspend fun updateSource(sourceId: String): FetchResult {
+        val entry = configStore.getInstalledSources().firstOrNull { it.sourceId == sourceId }
+            ?: return FetchResult.failure("Source not found: $sourceId")
+        val trust = configStore.getSourceTrust(sourceId)
+        val config = fetchConfig(entry.configUrl, trust)
+            ?: return FetchResult.failure("Failed to fetch updated config for $sourceId")
+
+        val result = configStore.updateSource(
+            sourceId = sourceId,
+            config = config,
+            configUrl = entry.configUrl,
+            trust = trust,
+        )
+        if (result.success) {
+            registry.refreshFromStore()
+            return FetchResult(
+                success = true,
+                isFirstConfig = result.isFirstConfig,
+                wasRollback = result.wasRollback,
+                providerCount = config.providers.size,
+                message = "Config updated for source $sourceId",
+            )
+        } else {
+            return FetchResult.failure(result.errors.joinToString("; "))
+        }
+    }
+
+    /** Enables or disables a source. Disabled sources are excluded from the registry. */
+    suspend fun setSourceEnabled(sourceId: String, enabled: Boolean): Boolean {
+        val ok = configStore.setSourceEnabled(sourceId, enabled)
+        if (ok) registry.refreshFromStore()
+        return ok
+    }
+
+    fun getInstalledSources(): List<SourceEntry> = configStore.getInstalledSources()
+
     fun getTrust(): RemoteSourceTrust? = configStore.getTrust()
+
+    /** Returns the trust for a specific source. */
+    fun getSourceTrust(sourceId: String): RemoteSourceTrust? = configStore.getSourceTrust(sourceId)
 
     fun scheduleAutomaticUpdates(configUrl: String, intervalHours: Long = 24) {
         RemoteConfigUpdateWorker.schedulePeriodicUpdate(appContext, configUrl, intervalHours)
@@ -98,6 +145,52 @@ class RemoteProviderManager(
 
     fun shutdown() {
         scope.cancel()
+    }
+
+    // ── Private helpers ──────────────────────────────────────────────────
+
+    private suspend fun fetchConfig(configUrl: String, trust: RemoteSourceTrust?): RemoteProviderConfig? {
+        return withContext(Dispatchers.IO) {
+            try {
+                val parsedOrigin = RemoteSourceTrust.parseOrigin(configUrl)
+                    ?: return@withContext null
+                if (parsedOrigin.isLoopback) return@withContext null
+
+                val activeTrust = trust ?: configStore.getTrust()
+                val isHttp = parsedOrigin.protocol == "http"
+                val isPrivate = parsedOrigin.isPrivateOrLocal
+
+                val isTrusted = if (isHttp) {
+                    activeTrust != null && activeTrust.allowHttpConfig && activeTrust.isConfigFetchAllowed(configUrl)
+                } else if (isPrivate) {
+                    activeTrust != null && activeTrust.allowPrivateIpConfig
+                } else true
+
+                if (!isTrusted) return@withContext null
+
+                val request = okhttp3.Request.Builder()
+                    .url(configUrl)
+                    .addHeader("Accept", "application/json")
+                    .addHeader("User-Agent", "Anilili/unknown")
+                    .build()
+
+                okHttpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@withContext null
+                    val body = response.body?.string() ?: return@withContext null
+                    kotlinx.serialization.json.Json
+                        .decodeFromString<RemoteProviderConfig>(RemoteProviderConfig.serializer(), body)
+                }
+            } catch (e: Exception) {
+                DiagnosticsLog.throwable("RemoteProviderManager fetchConfig failed: $configUrl", e)
+                null
+            }
+        }
+    }
+
+    private fun sourceIdFromUrl(configUrl: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val hash = digest.digest(configUrl.toByteArray()).joinToString("") { "%02x".format(it) }
+        return hash.take(16)
     }
 }
 
@@ -116,7 +209,7 @@ data class AddSourceResult(
 }
 
 data class RemoveSourceResult(
-    val success: Boolean,
+    val success: Boolean = true,
     val error: String? = null,
     val previousConfig: RemoteProviderList? = null,
 ) {

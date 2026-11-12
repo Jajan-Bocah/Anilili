@@ -13,10 +13,10 @@ import com.anilili.data.provider.remote.engine.workflow.WorkflowExecutor
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 
-data class RemoteProviderRuntime(
-    val entry: RemoteProviderEntry,
-    val resolvedCapabilities: ResolvedCapabilities,
-) {
+interface RemoteProviderRuntime {
+    val entry: RemoteProviderEntry
+    val resolvedCapabilities: ResolvedCapabilities
+
     companion object {
         fun create(
             entry: RemoteProviderEntry,
@@ -24,13 +24,19 @@ data class RemoteProviderRuntime(
             okHttpClient: OkHttpClient,
             json: Json,
             requestPolicy: RemoteRequestPolicy,
+            slugStore: RemoteSlugStore = RemoteSlugStore(),
         ): WorkflowRemoteProviderRuntime {
             val baseRuntime = entry.toRuntime()
             val executor = WorkflowExecutor(okHttpClient, requestPolicy)
-            return WorkflowRemoteProviderRuntime(baseRuntime, workflows, executor, json)
+            return WorkflowRemoteProviderRuntime(baseRuntime, workflows, executor, json, slugStore)
         }
     }
 }
+
+data class BasicRemoteProviderRuntime(
+    override val entry: RemoteProviderEntry,
+    override val resolvedCapabilities: ResolvedCapabilities,
+) : RemoteProviderRuntime
 
 data class ResolvedCapabilities(
     val sourceType: ResolvedSourceType,
@@ -57,7 +63,7 @@ enum class ResolvedSourceType {
 }
 
 fun RemoteProviderEntry.toRuntime(): RemoteProviderRuntime {
-    return RemoteProviderRuntime(
+    return BasicRemoteProviderRuntime(
         entry = this,
         resolvedCapabilities = resolveCapabilities(this),
     )
@@ -69,10 +75,11 @@ fun createWorkflowRuntime(
     okHttpClient: OkHttpClient,
     json: Json,
     requestPolicy: RemoteRequestPolicy,
+    slugStore: RemoteSlugStore = RemoteSlugStore(),
 ): WorkflowRemoteProviderRuntime {
     val baseRuntime = entry.toRuntime()
     val executor = WorkflowExecutor(okHttpClient, requestPolicy)
-    return WorkflowRemoteProviderRuntime(baseRuntime, workflows, executor, json)
+    return WorkflowRemoteProviderRuntime(baseRuntime, workflows, executor, json, slugStore)
 }
 
 private fun RemoteProviderEntry.resolveCapabilities(entry: RemoteProviderEntry): ResolvedCapabilities {

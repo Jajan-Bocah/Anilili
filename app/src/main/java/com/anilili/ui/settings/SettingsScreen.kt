@@ -2441,7 +2441,7 @@ fun SettingsScreen(
                         value = if (serverPriority.isEmpty()) {
                             "Automatic"
                         } else {
-                            ProviderCatalog.label(serverPriority.first()) +
+                            (if (com.anilili.data.AppGraph.isReady) com.anilili.data.AppGraph.providerRegistry.cachedLabel(serverPriority.first()) else ProviderCatalog.label(serverPriority.first())) +
                                 if (serverPriority.size > 1) " +${serverPriority.size - 1}" else ""
                         },
                         onClick = { openPicker = SettingsPicker.SERVER_PRIORITY },
@@ -3367,7 +3367,12 @@ private fun EnabledServersPicker(
     onDismiss: () -> Unit,
 ) {
     val hideAdult by SettingsStore.hideAdultContent.collectAsState()
-    val servers = remember(hideAdult) { ProviderCatalog.selectableProviders(hideAdult) }
+    val registry = remember { if (com.anilili.data.AppGraph.isReady) com.anilili.data.AppGraph.providerRegistry else null }
+    val servers = remember(hideAdult, registry) {
+        val builtIn = ProviderCatalog.selectableProviders(hideAdult)
+        val remote = registry?.cachedRemoteProviderIds() ?: emptyList()
+        (builtIn + remote).distinct()
+    }
     val enabled = servers.count { it !in disabled }
     MidnightDialogHost(
         onDismiss = onDismiss,
@@ -3399,8 +3404,8 @@ private fun EnabledServersPicker(
         servers.forEach { server ->
             val on = server !in disabled
             MidnightSelectionRow(
-                title = ProviderCatalog.label(server),
-                trailing = "Fast".takeIf { ProviderCatalog.isFast(server) },
+                title = registry?.cachedLabel(server) ?: ProviderCatalog.label(server),
+                trailing = "Fast".takeIf { registry?.cachedIsFast(server) ?: ProviderCatalog.isFast(server) },
                 selected = on,
                 // The last one standing cannot be turned off. With nothing left to ask, every
                 // catalogue comes back empty and every title reports no playable source — the app
@@ -3429,8 +3434,12 @@ private fun ServerPriorityPicker(
     // Only servers that are switched on can be ranked: a rank on one that is never asked is a
     // preference the resolver can never honour, and it would sit in the list of three taking a
     // slot from a server that can.
-    val servers = remember(hideAdult, disabled) {
-        ProviderCatalog.enabledProviders(ProviderCatalog.selectableProviders(hideAdult), disabled)
+    val registry = remember { if (com.anilili.data.AppGraph.isReady) com.anilili.data.AppGraph.providerRegistry else null }
+    val servers = remember(hideAdult, disabled, registry) {
+        val builtIn = ProviderCatalog.selectableProviders(hideAdult)
+        val remote = registry?.cachedRemoteProviderIds() ?: emptyList()
+        val all = (builtIn + remote).distinct()
+        ProviderCatalog.enabledProviders(all, disabled)
     }
     MidnightDialogHost(
         onDismiss = onDismiss,
@@ -3457,7 +3466,7 @@ private fun ServerPriorityPicker(
             val picked = rank >= 0
             val full = priority.size >= MAX_SERVER_PRIORITY
             MidnightChoiceRow(
-                title = ProviderCatalog.label(server),
+                title = registry?.cachedLabel(server) ?: ProviderCatalog.label(server),
                 trailing = if (picked) "#${rank + 1}" else null,
                 selected = picked,
                 // A full list still lets you tap a picked row, so the way out is dropping the one
@@ -3608,7 +3617,9 @@ private fun posterElementsSummary(hidden: Set<PosterElement>): String {
 }
 
 private fun enabledServersSummary(disabled: Set<String>, hideAdult: Boolean): String {
-    val servers = ProviderCatalog.selectableProviders(hideAdult)
+    val builtIn = ProviderCatalog.selectableProviders(hideAdult)
+    val remote = if (com.anilili.data.AppGraph.isReady) com.anilili.data.AppGraph.providerRegistry.cachedRemoteProviderIds() else emptyList()
+    val servers = (builtIn + remote).distinct()
     val enabled = servers.count { it !in disabled }
     return if (enabled == servers.size) "All ${servers.size}" else "$enabled of ${servers.size}"
 }

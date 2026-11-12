@@ -2403,7 +2403,7 @@ class MiruroRepository(
         }.withFillerMarks(anilistId)
     }
 
-    /** Merged view of both sources — used where the full provider list is needed (watch screen). */
+    /** Merged view of all sources — used where the full provider list is needed (watch screen). */
     suspend fun episodes(anilistId: Int): EpisodesResult = coroutineScope {
         val miruro = async {
             runCatching { miruroEpisodes(anilistId) }
@@ -2415,7 +2415,22 @@ class MiruroRepository(
                 .onFailure { DiagnosticsLog.throwable("Anivexa episodes failed id=$anilistId", it) }
                 .getOrDefault(EpisodesResult(emptyList()))
         }
-        mergeProviders(miruro.await(), anivexa.await())
+        val remote = async {
+            runCatching {
+                val mediaInfo = runCatching { animeInfo(anilistId) }.getOrNull()
+                val animeTitle = mediaInfo?.title?.preferred ?: mediaInfo?.title?.english ?: mediaInfo?.title?.romaji
+                val runtimes = providerRegistry.getWorkflowRuntimes()
+                val providerDataList = mutableListOf<com.anilili.data.model.ProviderData>()
+                for (rt in runtimes) {
+                    val epRes = rt.getEpisodes(anilistId, animeTitle)
+                    epRes?.providers?.let { providerDataList.addAll(it) }
+                }
+                EpisodesResult(providerDataList)
+            }.onFailure { DiagnosticsLog.throwable("Remote episodes failed id=$anilistId", it) }
+                .getOrDefault(EpisodesResult(emptyList()))
+        }
+        val baseMerged = mergeProviders(miruro.await(), anivexa.await())
+        mergeProviders(baseMerged, remote.await())
     }
 
     /** Providers present in both lists keep [b]'s entry (the fresher, fuller catalog). */
@@ -2433,12 +2448,22 @@ class MiruroRepository(
         variant: SourceVariant,
         anilistId: Int,
         allowInteractiveChallenges: Boolean = true,
-    ): SourcesResult = when (ProviderCatalog.sourceOf(provider)) {
-        ProviderCatalog.Source.ANIVEXA, ProviderCatalog.Source.MIRURO -> when (ProviderCatalog.sourceOf(provider)) {
-            ProviderCatalog.Source.ANIVEXA -> anivexa.getSources(pipeId, animeInfo(anilistId), allowInteractiveChallenges)
-            ProviderCatalog.Source.MIRURO -> pipe.getSources(pipeId, provider, variant, anilistId)
+    ): SourcesResult {
+        if (providerRegistry.isRemoteProvider(provider)) {
+            val workflowRuntime = providerRegistry.getWorkflowRuntime(provider)
+            if (workflowRuntime != null) {
+                val res = workflowRuntime.getSourcesForPipeId(pipeId, anilistId, variant)
+                if (res != null) return res
+            }
         }
-        else -> throw IllegalArgumentException("Unknown provider source type for $provider")
+
+        return when (ProviderCatalog.sourceOf(provider)) {
+            ProviderCatalog.Source.ANIVEXA, ProviderCatalog.Source.MIRURO -> when (ProviderCatalog.sourceOf(provider)) {
+                ProviderCatalog.Source.ANIVEXA -> anivexa.getSources(pipeId, animeInfo(anilistId), allowInteractiveChallenges)
+                ProviderCatalog.Source.MIRURO -> pipe.getSources(pipeId, provider, variant, anilistId)
+            }
+            else -> throw IllegalArgumentException("Unknown provider source type for $provider")
+        }
     }
 
     data class ResolvedSources(

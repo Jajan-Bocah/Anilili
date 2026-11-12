@@ -109,6 +109,8 @@ data class LanguageNormalizeOp(override val type: String = "language_normalize")
 data class JoinOp(override val type: String = "join", val separator: String) : NormalizeOperation
 @Serializable
 data class DefaultOp(override val type: String = "default", val value: String) : NormalizeOperation
+@Serializable
+data class Base64DecodeOp(override val type: String = "base64_decode", val urlSafe: Boolean = false) : NormalizeOperation
 
 @Serializable
 data class AssertStep(

@@ -4,68 +4,74 @@
     {
       "id": "kuramanime",
       "name": "Kuramanime",
-      "endpoint": "https://kuramanime.example.com/api",
+      "endpoint": "https://v20.kuramanime.ing/anime",
       "source": "generic_json",
+      "category": "anime",
+      "languages": [
+        "id"
+      ],
+      "subtitleVariants": [
+        "sub"
+      ],
+      "priority": 50,
+      "enabled": true,
       "capabilities": {
         "supportsEpisodes": true,
         "supportsSources": true,
-        "supportsSubtitles": true,
+        "supportsSubtitles": false,
         "supportsSkipTimes": false,
         "supportsDownload": false,
         "supportsSearch": true,
         "requiresWebView": false,
         "multiAudio": false,
-        "shortLivedStreamUrls": false,
+        "shortLivedStreamUrls": true,
         "countryLocked": null,
         "adultOnly": false
-      },
-      "category": "anime",
-      "languages": ["id", "en"],
-      "subtitleVariants": ["sub", "ssub"],
-      "priority": 10,
-      "enabled": true
+      }
     }
   ],
   "metadata": {
-    "name": "Kuramanime",
-    "description": "Indonesian anime streaming provider",
+    "name": "Kuramanime Verified Provider",
+    "description": "Kuramanime anime provider with JSON API search, episode discovery, and server resolution.",
     "author": "Anilili Community",
     "version": "1.0.0",
-    "sourceUrl": "https://raw.githubusercontent.com/anilili/remote-provider-configs/main/kuramanime.json",
-    "fetchedAt": 0,
+    "sourceUrl": "https://v20.kuramanime.ing/provider.json",
+    "fetchedAt": 1794417015,
     "checksum": null,
     "minAppVersion": "0.1.84",
     "maxAppVersion": null
   },
   "security": {
-    "allowedDomains": ["kuramanime.example.com", "cdn.kuramanime.example.com"],
-    "maxResponseBytes": 1048576,
-    "maxRequestsPerRun": 15,
+    "allowedDomains": [
+      "v20.kuramanime.ing"
+    ],
+    "maxResponseBytes": 2097152,
+    "maxRequestsPerRun": 12,
     "connectTimeoutMs": 10000,
     "readTimeoutMs": 15000,
     "totalTimeoutMs": 30000,
     "allowRedirects": true,
-    "maxRedirects": 5
-  },
-  "update": {
-    "mode": "auto",
-    "intervalHours": 24
+    "maxRedirects": 2
   },
   "workflows": {
     "search": {
-      "name": "Search anime",
+      "name": "Kuramanime search",
       "version": "1.0",
-      "description": "Search for anime by title",
+      "description": "Query Kuramanime JSON search API",
       "steps": [
         {
           "op": "http",
           "id": "search_request",
           "params": {
             "method": "GET",
-            "url": "https://kuramanime.example.com/api/search",
+            "url": "https://v20.kuramanime.ing/anime",
             "query": {
-              "q": "{{query}}",
-              "limit": "20"
+              "search": "{{query}}",
+              "order_by": "oldest",
+              "need_json": "true"
+            },
+            "headers": {
+              "Accept": "application/json"
             }
           },
           "saveAs": "search_response"
@@ -75,197 +81,67 @@
           "id": "parse_search",
           "params": {
             "input": "{{search_response.body}}",
-            "jsonPath": "data"
+            "jsonPath": "animes.data"
           },
           "saveAs": "search_results"
-        },
-        {
-          "op": "map",
-          "id": "map_search",
-          "params": {
-            "input": "{{search_results}}",
-            "mappings": {
-              "id": "anilistId",
-              "title": "title",
-              "image": "image",
-              "year": "year",
-              "type": "format"
-            }
-          },
-          "saveAs": "mapped_results"
         }
       ],
       "output": {
-        "type": "search",
+        "type": "SEARCH",
         "mapping": {
-          "results": "mapped_results"
+          "results": "search_results"
         }
       }
     },
     "episodes": {
-      "name": "Get episodes",
+      "name": "Kuramanime episodes",
       "version": "1.0",
-      "description": "Fetch episode list for an anime",
+      "description": "Parse episode list from detail page",
       "steps": [
         {
           "op": "http",
-          "id": "episodes_request",
+          "id": "detail_fetch",
           "params": {
             "method": "GET",
-            "url": "https://kuramanime.example.com/api/anime/{{anilistId}}/episodes"
+            "url": "{{url}}"
           },
-          "saveAs": "episodes_response"
+          "saveAs": "detail_response"
         },
         {
-          "op": "parse_json",
-          "id": "parse_episodes",
+          "op": "parse_html",
+          "id": "detail_parse",
           "params": {
-            "input": "{{episodes_response.body}}",
-            "jsonPath": "data.episodes"
+            "input": "{{detail_response.body}}"
           },
-          "saveAs": "episodes_data"
+          "saveAs": "detail_doc"
         },
         {
-          "op": "map",
-          "id": "map_episodes",
+          "op": "select",
+          "id": "episodes_list",
           "params": {
-            "input": "{{episodes_data}}",
-            "mappings": {
-              "id": "pipeId",
-              "number": "number",
-              "title": "title",
-              "image": "image",
-              "filler": "filler",
-              "airDate": "airDate",
-              "overview": "overview",
-              "runtime": "runtime",
-              "rating": "rating",
-              "dubbed": "dubbed",
-              "airingAt": "airingAt"
-            }
+            "input": "detail_doc",
+            "selector": "a.ep-button[href*=\"/episode/\"]",
+            "attribute": "href",
+            "mode": "ALL"
           },
-          "saveAs": "mapped_episodes"
+          "saveAs": "ep_urls"
+        },
+        {
+          "op": "select",
+          "id": "ep_titles",
+          "params": {
+            "input": "detail_doc",
+            "selector": "a.ep-button[href*=\"/episode/\"]",
+            "mode": "ALL"
+          },
+          "saveAs": "ep_numbers"
         }
       ],
       "output": {
-        "type": "episodes",
+        "type": "EPISODES",
         "mapping": {
-          "episodes": "mapped_episodes"
-        }
-      }
-    },
-    "sources": {
-      "name": "Get stream sources",
-      "version": "1.0",
-      "description": "Resolve stream URLs for an episode",
-      "steps": [
-        {
-          "op": "http",
-          "id": "sources_request",
-          "params": {
-            "method": "GET",
-            "url": "https://kuramanime.example.com/api/episode/{{pipeId}}/sources"
-          },
-          "saveAs": "sources_response"
-        },
-        {
-          "op": "parse_json",
-          "id": "parse_sources",
-          "params": {
-            "input": "{{sources_response.body}}",
-            "jsonPath": "data.sources"
-          },
-          "saveAs": "sources_data"
-        },
-        {
-          "op": "map",
-          "id": "map_streams",
-          "params": {
-            "input": "{{sources_data}}",
-            "mappings": {
-              "url": "url",
-              "type": "type",
-              "quality": "quality",
-              "audio": "audio",
-              "referer": "referer",
-              "headers": "headers"
-            }
-          },
-          "saveAs": "mapped_streams"
-        },
-        {
-          "op": "parse_json",
-          "id": "parse_subtitles",
-          "params": {
-            "input": "{{sources_response.body}}",
-            "jsonPath": "data.subtitles"
-          },
-          "saveAs": "subtitles_data"
-        },
-        {
-          "op": "map",
-          "id": "map_subtitles",
-          "params": {
-            "input": "{{subtitles_data}}",
-            "mappings": {
-              "url": "url",
-              "label": "label",
-              "language": "language"
-            }
-          },
-          "saveAs": "mapped_subtitles"
-        }
-      ],
-      "output": {
-        "type": "sources",
-        "mapping": {
-          "streams": "mapped_streams",
-          "subtitles": "mapped_subtitles"
-        }
-      }
-    },
-    "servers": {
-      "name": "Get server list",
-      "version": "1.0",
-      "description": "Get available servers for an episode",
-      "steps": [
-        {
-          "op": "http",
-          "id": "servers_request",
-          "params": {
-            "method": "GET",
-            "url": "https://kuramanime.example.com/api/episode/{{pipeId}}/servers"
-          },
-          "saveAs": "servers_response"
-        },
-        {
-          "op": "parse_json",
-          "id": "parse_servers",
-          "params": {
-            "input": "{{servers_response.body}}",
-            "jsonPath": "data.servers"
-          },
-          "saveAs": "servers_data"
-        },
-        {
-          "op": "map",
-          "id": "map_servers",
-          "params": {
-            "input": "{{servers_data}}",
-            "mappings": {
-              "name": "name",
-              "url": "url",
-              "quality": "quality",
-              "language": "language"
-            }
-          },
-          "saveAs": "mapped_servers"
-        }
-      ],
-      "output": {
-        "type": "servers",
-        "mapping": {
-          "servers": "mapped_servers"
+          "episodeUrls": "ep_urls",
+          "episodeNumbers": "ep_numbers"
         }
       }
     }

@@ -4,268 +4,238 @@
     {
       "id": "anichin",
       "name": "Anichin",
-      "endpoint": "https://anichin.example.com/api",
-      "source": "generic_json",
+      "endpoint": "https://anichin.moe/",
+      "source": "generic_html",
       "capabilities": {
         "supportsEpisodes": true,
         "supportsSources": true,
-        "supportsSubtitles": true,
+        "supportsSubtitles": false,
         "supportsSkipTimes": false,
         "supportsDownload": false,
         "supportsSearch": true,
-        "requiresWebView": false,
+        "requiresWebView": true,
         "multiAudio": false,
-        "shortLivedStreamUrls": false,
+        "shortLivedStreamUrls": true,
         "countryLocked": null,
         "adultOnly": false
       },
-      "category": "anime",
-      "languages": ["id", "en"],
-      "subtitleVariants": ["sub", "ssub"],
-      "priority": 10,
+      "category": "donghua",
+      "languages": [
+        "id"
+      ],
+      "subtitleVariants": [
+        "sub"
+      ],
+      "priority": 100,
       "enabled": true
     }
   ],
   "metadata": {
-    "name": "Anichin",
-    "description": "Indonesian anime streaming provider with subtitle support",
+    "name": "Anichin Verified Provider",
+    "description": "Anichin donghua provider with HTML parsing, Base64 mirror resolution, and embed stream support.",
     "author": "Anilili Community",
     "version": "1.0.0",
-    "sourceUrl": "https://raw.githubusercontent.com/anilili/remote-provider-configs/main/anichin.json",
-    "fetchedAt": 0,
+    "sourceUrl": "https://anichin.moe/provider.json",
+    "fetchedAt": 1794416177,
     "checksum": null,
     "minAppVersion": "0.1.84",
     "maxAppVersion": null
   },
   "security": {
-    "allowedDomains": ["anichin.example.com", "cdn.anichin.example.com"],
-    "maxResponseBytes": 1048576,
-    "maxRequestsPerRun": 15,
+    "allowedDomains": [
+      "anichin.moe",
+      "ok.ru",
+      "mega.nz"
+    ],
+    "maxResponseBytes": 2097152,
+    "maxRequestsPerRun": 12,
     "connectTimeoutMs": 10000,
     "readTimeoutMs": 15000,
     "totalTimeoutMs": 30000,
     "allowRedirects": true,
-    "maxRedirects": 5
-  },
-  "update": {
-    "mode": "auto",
-    "intervalHours": 24
+    "maxRedirects": 3
   },
   "workflows": {
     "search": {
-      "name": "Search anime",
+      "name": "Search Anichin title",
       "version": "1.0",
-      "description": "Search for anime by title",
+      "description": "Search Anichin by anime/donghua title",
       "steps": [
         {
           "op": "http",
-          "id": "search_request",
+          "id": "search_fetch",
           "params": {
             "method": "GET",
-            "url": "https://anichin.example.com/api/search",
+            "url": "https://anichin.moe/",
             "query": {
-              "q": "{{query}}",
-              "limit": "20"
+              "s": "{{query}}"
             }
           },
           "saveAs": "search_response"
         },
         {
-          "op": "parse_json",
-          "id": "parse_search",
+          "op": "parse_html",
+          "id": "search_parse",
           "params": {
-            "input": "{{search_response.body}}",
-            "jsonPath": "data"
+            "input": "{{search_response.body}}"
           },
-          "saveAs": "search_results"
+          "saveAs": "search_document"
         },
         {
-          "op": "map",
-          "id": "map_search",
+          "op": "select",
+          "id": "search_titles",
           "params": {
-            "input": "{{search_results}}",
-            "mappings": {
-              "id": "anilistId",
-              "title": "title",
-              "image": "image",
-              "year": "year",
-              "type": "format"
-            }
+            "input": "search_document",
+            "selector": ".listupd article.bs a.tip",
+            "attribute": "title",
+            "mode": "ALL"
           },
-          "saveAs": "mapped_results"
+          "saveAs": "search_titles"
+        },
+        {
+          "op": "select",
+          "id": "search_links",
+          "params": {
+            "input": "search_document",
+            "selector": ".listupd article.bs a.tip",
+            "attribute": "href",
+            "mode": "ALL"
+          },
+          "saveAs": "search_urls"
+        },
+        {
+          "op": "select",
+          "id": "search_images",
+          "params": {
+            "input": "search_document",
+            "selector": ".listupd article.bs a.tip img",
+            "attribute": "src",
+            "mode": "ALL"
+          },
+          "saveAs": "search_images"
         }
       ],
       "output": {
-        "type": "search",
+        "type": "SEARCH",
         "mapping": {
-          "results": "mapped_results"
+          "titles": "search_titles",
+          "urls": "search_urls",
+          "images": "search_images"
         }
       }
     },
     "episodes": {
-      "name": "Get episodes",
+      "name": "Locate anime details and episodes",
       "version": "1.0",
-      "description": "Fetch episode list for an anime",
+      "description": "Fetch episode list for selected series page",
       "steps": [
         {
           "op": "http",
-          "id": "episodes_request",
+          "id": "series_page_fetch",
           "params": {
             "method": "GET",
-            "url": "https://anichin.example.com/api/anime/{{anilistId}}/episodes"
+            "url": "{{url}}"
           },
-          "saveAs": "episodes_response"
+          "saveAs": "series_page_response"
         },
         {
-          "op": "parse_json",
-          "id": "parse_episodes",
+          "op": "parse_html",
+          "id": "series_page_parse",
           "params": {
-            "input": "{{episodes_response.body}}",
-            "jsonPath": "data.episodes"
+            "input": "{{series_page_response.body}}"
           },
-          "saveAs": "episodes_data"
+          "saveAs": "series_document"
         },
         {
-          "op": "map",
-          "id": "map_episodes",
+          "op": "select",
+          "id": "episode_urls",
           "params": {
-            "input": "{{episodes_data}}",
-            "mappings": {
-              "id": "pipeId",
-              "number": "number",
-              "title": "title",
-              "image": "image",
-              "filler": "filler",
-              "airDate": "airDate",
-              "overview": "overview",
-              "runtime": "runtime",
-              "rating": "rating",
-              "dubbed": "dubbed",
-              "airingAt": "airingAt"
-            }
+            "input": "series_document",
+            "selector": ".eplister li a",
+            "attribute": "href",
+            "mode": "ALL"
           },
-          "saveAs": "mapped_episodes"
+          "saveAs": "episode_urls"
+        },
+        {
+          "op": "select",
+          "id": "episode_numbers",
+          "params": {
+            "input": "series_document",
+            "selector": ".eplister li .epl-num",
+            "mode": "ALL"
+          },
+          "saveAs": "episode_numbers"
+        },
+        {
+          "op": "select",
+          "id": "episode_titles",
+          "params": {
+            "input": "series_document",
+            "selector": ".eplister li .epl-title",
+            "mode": "ALL"
+          },
+          "saveAs": "episode_titles"
         }
       ],
       "output": {
-        "type": "episodes",
+        "type": "EPISODES",
         "mapping": {
-          "episodes": "mapped_episodes"
+          "episodeUrls": "episode_urls",
+          "episodeNumbers": "episode_numbers",
+          "episodeTitles": "episode_titles"
         }
       }
     },
     "sources": {
-      "name": "Get stream sources",
+      "name": "Resolve watch stream sources",
       "version": "1.0",
-      "description": "Resolve stream URLs for an episode",
+      "description": "Extract stream or embed iframe from episode page",
       "steps": [
         {
           "op": "http",
-          "id": "sources_request",
+          "id": "watch_fetch",
           "params": {
             "method": "GET",
-            "url": "https://anichin.example.com/api/episode/{{pipeId}}/sources"
+            "url": "{{url}}"
           },
-          "saveAs": "sources_response"
+          "saveAs": "watch_response"
         },
         {
-          "op": "parse_json",
-          "id": "parse_sources",
+          "op": "parse_html",
+          "id": "watch_parse",
           "params": {
-            "input": "{{sources_response.body}}",
-            "jsonPath": "data.sources"
+            "input": "{{watch_response.body}}"
           },
-          "saveAs": "sources_data"
+          "saveAs": "watch_doc"
         },
         {
-          "op": "map",
-          "id": "map_streams",
+          "op": "select",
+          "id": "mirror_options",
           "params": {
-            "input": "{{sources_data}}",
-            "mappings": {
-              "url": "url",
-              "type": "type",
-              "quality": "quality",
-              "audio": "audio",
-              "referer": "referer",
-              "headers": "headers"
-            }
+            "input": "watch_doc",
+            "selector": "select.mirror option",
+            "attribute": "value",
+            "mode": "ALL"
           },
-          "saveAs": "mapped_streams"
+          "saveAs": "raw_mirrors"
         },
         {
-          "op": "parse_json",
-          "id": "parse_subtitles",
+          "op": "select",
+          "id": "mirror_names",
           "params": {
-            "input": "{{sources_response.body}}",
-            "jsonPath": "data.subtitles"
+            "input": "watch_doc",
+            "selector": "select.mirror option",
+            "mode": "ALL"
           },
-          "saveAs": "subtitles_data"
-        },
-        {
-          "op": "map",
-          "id": "map_subtitles",
-          "params": {
-            "input": "{{subtitles_data}}",
-            "mappings": {
-              "url": "url",
-              "label": "label",
-              "language": "language"
-            }
-          },
-          "saveAs": "mapped_subtitles"
+          "saveAs": "mirror_labels"
         }
       ],
       "output": {
-        "type": "sources",
+        "type": "SOURCES",
         "mapping": {
-          "streams": "mapped_streams",
-          "subtitles": "mapped_subtitles"
-        }
-      }
-    },
-    "servers": {
-      "name": "Get server list",
-      "version": "1.0",
-      "description": "Get available servers for an episode",
-      "steps": [
-        {
-          "op": "http",
-          "id": "servers_request",
-          "params": {
-            "method": "GET",
-            "url": "https://anichin.example.com/api/episode/{{pipeId}}/servers"
-          },
-          "saveAs": "servers_response"
-        },
-        {
-          "op": "parse_json",
-          "id": "parse_servers",
-          "params": {
-            "input": "{{servers_response.body}}",
-            "jsonPath": "data.servers"
-          },
-          "saveAs": "servers_data"
-        },
-        {
-          "op": "map",
-          "id": "map_servers",
-          "params": {
-            "input": "{{servers_data}}",
-            "mappings": {
-              "name": "name",
-              "url": "url",
-              "quality": "quality",
-              "language": "language"
-            }
-          },
-          "saveAs": "mapped_servers"
-        }
-      ],
-      "output": {
-        "type": "servers",
-        "mapping": {
-          "servers": "mapped_servers"
+          "streams": "raw_mirrors",
+          "servers": "mirror_labels"
         }
       }
     }

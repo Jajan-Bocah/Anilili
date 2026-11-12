@@ -1,5 +1,6 @@
 package com.anilili.data.provider.remote.engine.workflow
 
+import com.anilili.data.provider.remote.engine.security.PolicyEnforcingDns
 import com.anilili.data.provider.remote.engine.security.RemoteRequestPolicy
 import com.anilili.diagnostics.DiagnosticsLog
 import kotlinx.coroutines.Dispatchers
@@ -9,8 +10,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import com.anilili.data.provider.remote.engine.security.RemoteRequestPolicy.SecurityConfig
-import java.nio.charset.StandardCharsets
 import java.net.URL
 import java.util.concurrent.TimeUnit
 
@@ -61,8 +60,7 @@ class WorkflowExecutor(
                     context.put(key, output)
                 }
             }
-
-            requestPolicy.incrementRequestCount(workflowId)
+            // Request counting is strictly performed inside executeHttpStep for real HTTP requests
         }
 
         val totalTime = System.currentTimeMillis() - startTime
@@ -111,6 +109,9 @@ class WorkflowExecutor(
             return StepResult.failure(validation.error ?: "Request validation failed")
         }
 
+        // Increment request count only on actual HTTP requests
+        requestPolicy.incrementRequestCount(workflowId)
+
         val headers = TemplateEvaluator.evaluateMap(step.headers, context)
         val query = TemplateEvaluator.evaluateMap(step.query, context)
 
@@ -148,12 +149,35 @@ class WorkflowExecutor(
 
             val connectTimeout = requestPolicy.getConnectTimeoutMs().toLong()
             val readTimeout = requestPolicy.getReadTimeoutMs().toLong()
-            val call = okHttpClient.newBuilder()
+
+            // Build specialized OkHttpClient with connection-time DNS policy enforcement and safe redirect handling
+            val client = okHttpClient.newBuilder()
+                .dns(PolicyEnforcingDns(requestPolicy))
                 .connectTimeout(connectTimeout, TimeUnit.MILLISECONDS)
                 .readTimeout(readTimeout, TimeUnit.MILLISECONDS)
                 .followRedirects(requestPolicy.isRedirectsAllowed())
+                .addNetworkInterceptor { chain ->
+                    val origRequest = chain.request()
+                    val response = chain.proceed(origRequest)
+
+                    // Safe redirect handling: if redirecting cross-host, strip sensitive headers
+                    if (response.isRedirect) {
+                        val location = response.header("Location")
+                        if (!location.isNullOrBlank()) {
+                            val targetUrl = try { URL(origRequest.url.toUrl(), location) } catch (e: Exception) { null }
+                            if (targetUrl != null && !targetUrl.host.equals(origRequest.url.host, ignoreCase = true)) {
+                                val redirectValidation = requestPolicy.validateRedirect(origRequest.url.toString(), targetUrl.toString(), workflowId)
+                                if (!redirectValidation.allowed) {
+                                    throw java.io.IOException("Blocked unsafe redirect to ${targetUrl}: ${redirectValidation.error}")
+                                }
+                            }
+                        }
+                    }
+                    response
+                }
                 .build()
-                .newCall(request)
+
+            val call = client.newCall(request)
 
             val response = runCatching { call.execute() }
                 .onFailure { StepResult.failure("HTTP request failed: ${it.message}") }
@@ -165,12 +189,26 @@ class WorkflowExecutor(
                     return@withContext StepResult.failure("HTTP ${response.code}: ${response.message}")
                 }
 
-                val responseBody = response.body?.use { it.string() } ?: ""
-                val contentLength = response.body?.contentLength() ?: responseBody.length.toLong()
-
-                if (contentLength > requestPolicy.getMaxResponseBytes()) {
-                    return@withContext StepResult.failure("Response size exceeds limit: $contentLength > ${requestPolicy.getMaxResponseBytes()}")
+                val maxBytes = requestPolicy.getMaxResponseBytes()
+                val declaredContentLength = response.body?.contentLength() ?: -1L
+                if (declaredContentLength > maxBytes) {
+                    return@withContext StepResult.failure("Response content-length exceeds limit: $declaredContentLength > $maxBytes")
                 }
+
+                // Stream bounded read to prevent heap OOM before parsing
+                val bodySource = response.body?.source() ?: return@withContext StepResult.failure("Null response body")
+                val buffer = okio.Buffer()
+                var totalBytesRead = 0L
+                while (!bodySource.exhausted()) {
+                    val toRead = minOf(8192L, maxBytes - totalBytesRead + 1L)
+                    val read = bodySource.read(buffer, toRead)
+                    if (read == -1L) break
+                    totalBytesRead += read
+                    if (totalBytesRead > maxBytes) {
+                        return@withContext StepResult.failure("Response stream size exceeded policy limit of $maxBytes bytes")
+                    }
+                }
+                val responseBody = buffer.readUtf8()
 
                 val result = HttpResponse(
                     statusCode = response.code,
@@ -185,10 +223,40 @@ class WorkflowExecutor(
         }
     }
 
+    private fun resolveInputString(inputExpr: String, context: WorkflowContext): String? {
+        if (inputExpr.startsWith("{{") && inputExpr.endsWith("}}")) {
+            return TemplateEvaluator.evaluate(inputExpr, context).takeIf { it.isNotBlank() }
+        }
+        val direct = context.variables[inputExpr]
+        if (direct != null) {
+            return when (direct) {
+                is HttpResponse -> direct.body
+                is String -> direct
+                is kotlinx.serialization.json.JsonPrimitive -> direct.content
+                else -> direct.toString()
+            }
+        }
+        val resolved = TemplateEvaluator.resolveVariable(inputExpr, context)
+        if (resolved != null) return resolved
+
+        return TemplateEvaluator.evaluate(inputExpr, context).takeIf { it.isNotBlank() }
+    }
+
+    private fun resolveInputRaw(inputExpr: String, context: WorkflowContext): Any? {
+        if (inputExpr.startsWith("{{") && inputExpr.endsWith("}}")) {
+            return TemplateEvaluator.resolveRawVariable(inputExpr, context)
+        }
+        val direct = context.variables[inputExpr]
+        if (direct != null) {
+            return if (direct is HttpResponse) direct.body else direct
+        }
+        return TemplateEvaluator.resolveRawVariable(inputExpr, context)
+    }
+
     private fun executeParseHtmlStep(step: ParseHtmlStep, context: WorkflowContext): StepResult {
-        val input = TemplateEvaluator.evaluate(step.input, context)
-        if (input.isBlank()) {
-            return StepResult.failure("ParseHtmlStep: input is empty")
+        val input = resolveInputString(step.input, context)
+        if (input.isNullOrBlank()) {
+            return StepResult.failure("ParseHtmlStep: input '${step.input}' is empty or not resolved")
         }
 
         return try {
@@ -200,7 +268,14 @@ class WorkflowExecutor(
     }
 
     private fun executeSelectStep(step: SelectStep, context: WorkflowContext): StepResult {
-        val input = context.getString(step.input) ?: return StepResult.failure("SelectStep: input variable '${step.input}' not found or not a string")
+        val rawInput = resolveInputRaw(step.input, context)
+        val input = when (rawInput) {
+            is String -> rawInput
+            is HttpResponse -> rawInput.body
+            is org.jsoup.nodes.Document -> rawInput.outerHtml()
+            is org.jsoup.nodes.Element -> rawInput.outerHtml()
+            else -> rawInput?.toString()
+        } ?: return StepResult.failure("SelectStep: input variable '${step.input}' not found")
 
         return try {
             val result = when (step.mode) {
@@ -217,10 +292,8 @@ class WorkflowExecutor(
     }
 
     private fun executeParseJsonStep(step: ParseJsonStep, context: WorkflowContext): StepResult {
-        val input = context.getString(step.input) ?: return StepResult.failure("ParseJsonStep: input variable '${step.input}' not found or not a string")
-        if (input.isBlank()) {
-            return StepResult.failure("ParseJsonStep: input is empty")
-        }
+        val input = resolveInputString(step.input, context)
+            ?: return StepResult.failure("ParseJsonStep: input variable '${step.input}' not found or empty")
 
         return try {
             val result = step.jsonPath?.let { path ->
@@ -233,10 +306,8 @@ class WorkflowExecutor(
     }
 
     private fun executeRegexStep(step: RegexStep, context: WorkflowContext): StepResult {
-        val input = context.getString(step.input) ?: return StepResult.failure("RegexStep: input variable '${step.input}' not found or not a string")
-        if (input.isBlank()) {
-            return StepResult.failure("RegexStep: input is empty")
-        }
+        val input = resolveInputString(step.input, context)
+            ?: return StepResult.failure("RegexStep: input variable '${step.input}' not found or empty")
 
         return try {
             val result = when (step.mode) {
@@ -251,14 +322,17 @@ class WorkflowExecutor(
     }
 
     private fun executeMapStep(step: MapStep, context: WorkflowContext): StepResult {
-        val input = context.getString(step.input) ?: return StepResult.failure("MapStep: input variable '${step.input}' not found or not a string")
-        if (input.isBlank()) {
-            return StepResult.failure("MapStep: input is empty")
-        }
+        val rawInput = resolveInputRaw(step.input, context)
+        val sourceToMap = when (rawInput) {
+            is kotlinx.serialization.json.JsonElement -> rawInput
+            is List<*> -> rawInput
+            is Map<*, *> -> rawInput
+            is String -> runCatching { jsonParser.parse(rawInput) }.getOrElse { rawInput }
+            else -> rawInput
+        } ?: return StepResult.failure("MapStep: input variable '${step.input}' not found")
 
         return try {
-            val parsed = jsonParser.parse(input)
-            val mapped = jsonParser.mapFields(parsed, step.mappings)
+            val mapped = jsonParser.mapFields(sourceToMap, step.mappings)
             StepResult.success(mapped)
         } catch (e: Exception) {
             StepResult.failure("Mapping failed: ${e.message}")
@@ -266,7 +340,8 @@ class WorkflowExecutor(
     }
 
     private fun executeNormalizeStep(step: NormalizeStep, context: WorkflowContext): StepResult {
-        var value = context.getString(step.input) ?: return StepResult.failure("NormalizeStep: input variable '${step.input}' not found or not a string")
+        var value = resolveInputString(step.input, context)
+            ?: return StepResult.failure("NormalizeStep: input variable '${step.input}' not found")
 
         for (op in step.operations) {
             value = when (op) {
@@ -277,10 +352,13 @@ class WorkflowExecutor(
                 is EpisodeNumberOp -> normalizeEpisodeNumber(value)
                 is LanguageNormalizeOp -> normalizeLanguage(value)
                 is JoinOp -> {
-                    val list = context.getList(step.input)?.joinToString(op.separator) ?: value
-                    return StepResult.success(list)
+                    val list = (resolveInputRaw(step.input, context) as? List<*>)
+                        ?: context.getList(step.input)
+                    val joined = list?.joinToString(op.separator) ?: value
+                    return StepResult.success(joined)
                 }
                 is DefaultOp -> if (value.isBlank()) op.value else value
+                is Base64DecodeOp -> Base64Codec.decodeToString(value)
             }
         }
 
@@ -307,26 +385,16 @@ class WorkflowExecutor(
         return when (value.lowercase().trim()) {
             "en", "eng", "english" -> "eng"
             "ja", "jpn", "japanese" -> "jpn"
-            "zh", "zho", "chinese" -> "zho"
-            "ko", "kor", "korean" -> "kor"
-            "es", "spa", "spanish" -> "spa"
-            "pt", "por", "portuguese" -> "por"
-            "fr", "fra", "french" -> "fra"
-            "de", "deu", "german" -> "deu"
-            "ar", "ara", "arabic" -> "ara"
-            "id", "ind", "indonesian" -> "ind"
-            "hi", "hin", "hindi" -> "hin"
-            "th", "tha", "thai" -> "tha"
-            "vi", "vie", "vietnamese" -> "vie"
+            "id", "ind", "indonesia", "indonesian" -> "ind"
             else -> value.lowercase().trim()
         }
     }
 
     private fun executeAssertStep(step: AssertStep, context: WorkflowContext): StepResult {
-        val input = context.getString(step.input) ?: return StepResult.failure("AssertStep: input variable '${step.input}' not found")
+        val input = resolveInputString(step.input, context) ?: ""
 
         val passed = when (step.condition) {
-            is NotNullCondition -> input.isNotBlank()
+            is NotNullCondition -> input.isNotEmpty()
             is NotEmptyCondition -> input.isNotBlank()
             is EqualsCondition -> input == step.condition.value
             is ContainsCondition -> input.contains(step.condition.value, ignoreCase = true)
@@ -346,7 +414,12 @@ class WorkflowExecutor(
     }
 
     private fun executeFilterStep(step: FilterStep, context: WorkflowContext): StepResult {
-        val list = context.getList(step.input) ?: return StepResult.failure("FilterStep: input variable '${step.input}' not found or not a list")
+        val raw = resolveInputRaw(step.input, context)
+        val list = when (raw) {
+            is List<*> -> raw
+            is kotlinx.serialization.json.JsonArray -> raw.map { (it as? kotlinx.serialization.json.JsonPrimitive)?.content ?: it.toString() }
+            else -> context.getList(step.input)
+        } ?: return StepResult.failure("FilterStep: input variable '${step.input}' not found or not a list")
 
         val filtered = list.filter { item ->
             val str = item.toString()
@@ -364,8 +437,8 @@ class WorkflowExecutor(
     private fun extractOutput(output: WorkflowOutput, context: WorkflowContext): Any? {
         return when (output.type) {
             OutputType.RAW -> context.variables
-            else -> output.mapping.mapValues { (key, varName) ->
-                key to context.getString(varName)
+            else -> output.mapping.mapValues { (_, varName) ->
+                context.variables[varName] ?: context.getString(varName)
             }
         }
     }
@@ -399,17 +472,22 @@ interface RegexEngine {
 }
 
 class JsoupHtmlParser : HtmlParser {
-    override fun parse(html: String): Any = org.jsoup.Jsoup.parse(html)
+    override fun parse(html: String): Any {
+        return org.jsoup.Jsoup.parse(html)
+    }
 
     override fun selectFirst(html: String, selector: String, attribute: String?): String? {
         val doc = org.jsoup.Jsoup.parse(html)
-        val el = doc.selectFirst(selector) ?: return null
-        return if (attribute != null) el.attr(attribute) else el.text()
+        val element = doc.selectFirst(selector) ?: return null
+        return if (attribute != null) element.attr(attribute) else element.text()
     }
 
     override fun selectAll(html: String, selector: String, attribute: String?): List<String> {
         val doc = org.jsoup.Jsoup.parse(html)
-        return doc.select(selector).map { if (attribute != null) it.attr(attribute) else it.text() }
+        val elements = doc.select(selector)
+        return elements.map { element ->
+            if (attribute != null) element.attr(attribute) else element.text()
+        }
     }
 
     override fun selectText(html: String, selector: String): String? {
@@ -432,51 +510,79 @@ class KotlinxJsonParser : JsonParser {
     private val json = kotlinx.serialization.json.Json {
         ignoreUnknownKeys = true
         isLenient = true
-        coerceInputValues = true
     }
 
-    override fun parse(jsonStr: String): Any {
-        return json.parseToJsonElement(jsonStr)
+    override fun parse(jsonString: String): Any {
+        return json.parseToJsonElement(jsonString)
     }
 
-    override fun extractByPath(jsonStr: String, path: String): Any? {
-        val element = parse(jsonStr) as kotlinx.serialization.json.JsonElement
-        return extractByPath(element, path)
-    }
-
-    private fun extractByPath(element: kotlinx.serialization.json.JsonElement, path: String): Any? {
-        val parts = path.split(".").filter { it.isNotBlank() }
-        var current: kotlinx.serialization.json.JsonElement = element
+    override fun extractByPath(jsonString: String, path: String): Any? {
+        val element = json.parseToJsonElement(jsonString)
+        val parts = path.split(".")
+        var current: kotlinx.serialization.json.JsonElement? = element
 
         for (part in parts) {
             current = when {
-                part.matches(Regex("^\\[\\d+\\]$")) -> {
-                    val index = part.substring(1, part.length - 1).toIntOrNull() ?: return null
-                    (current as? kotlinx.serialization.json.JsonArray)?.getOrNull(index) ?: return null
+                part.startsWith("[") && part.endsWith("]") -> {
+                    val index = part.removePrefix("[").removeSuffix("]").toIntOrNull() ?: return null
+                    val array = current as? kotlinx.serialization.json.JsonArray ?: return null
+                    if (index in 0 until array.size) array[index] else null
                 }
-                else -> {
-                    (current as? kotlinx.serialization.json.JsonObject)?.get(part) ?: return null
-                }
+                current is kotlinx.serialization.json.JsonObject -> current[part]
+                else -> null
             }
+            if (current == null) return null
         }
 
         return when (current) {
             is kotlinx.serialization.json.JsonPrimitive -> current.content
-            is kotlinx.serialization.json.JsonObject -> current
-            is kotlinx.serialization.json.JsonArray -> current
-            is kotlinx.serialization.json.JsonNull -> null
-            else -> current
+            is kotlinx.serialization.json.JsonArray -> current.map {
+                (it as? kotlinx.serialization.json.JsonPrimitive)?.content ?: it.toString()
+            }
+            else -> current?.toString()
         }
     }
 
     override fun mapFields(source: Any, mappings: Map<String, String>): Any {
-        val obj = source as? kotlinx.serialization.json.JsonObject ?: return source
-        val result = kotlinx.serialization.json.JsonObject(
+        return when (source) {
+            is kotlinx.serialization.json.JsonArray -> {
+                kotlinx.serialization.json.JsonArray(
+                    source.map { element ->
+                        if (element is kotlinx.serialization.json.JsonObject) {
+                            mapJsonObject(element, mappings)
+                        } else {
+                            element
+                        }
+                    }
+                )
+            }
+            is kotlinx.serialization.json.JsonObject -> {
+                mapJsonObject(source, mappings)
+            }
+            is List<*> -> {
+                source.map { item ->
+                    if (item != null) mapFields(item, mappings) else null
+                }
+            }
+            is Map<*, *> -> {
+                source.entries.associate { (key, value) ->
+                    val newKey = mappings[key.toString()] ?: key.toString()
+                    newKey to value
+                }
+            }
+            else -> source
+        }
+    }
+
+    private fun mapJsonObject(
+        obj: kotlinx.serialization.json.JsonObject,
+        mappings: Map<String, String>,
+    ): kotlinx.serialization.json.JsonObject {
+        return kotlinx.serialization.json.JsonObject(
             obj.entries.associate { (key, value) ->
                 (mappings[key] ?: key) to value
             }
         )
-        return result
     }
 }
 

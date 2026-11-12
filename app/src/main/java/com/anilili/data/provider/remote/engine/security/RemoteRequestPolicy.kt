@@ -17,6 +17,7 @@ class RemoteRequestPolicy(
     private val allowRedirects: Boolean = true,
     private val maxRedirects: Int = 5,
     val trust: RemoteSourceTrust? = null,
+    internal val allowLoopbackForTesting: Boolean = false,
 ) {
     private val requestCount = ConcurrentHashMap<String, Int>()
 
@@ -38,7 +39,7 @@ class RemoteRequestPolicy(
 
         val host = parsedUrl.host.lowercase()
 
-        if (RemoteSourceTrust.isLoopbackHost(host)) {
+        if (!allowLoopbackForTesting && RemoteSourceTrust.isLoopbackHost(host)) {
             return ValidationResult.deny("Access to loopback addresses is blocked: $host")
         }
 
@@ -48,16 +49,24 @@ class RemoteRequestPolicy(
         }
 
         if (protocol == "http") {
-            val isTrustedHttp = trust != null && trust.allowHttpEndpoints && trust.isEndpointOriginTrusted(url)
-            if (!isTrustedHttp) {
-                return ValidationResult.deny("Only HTTPS URLs are allowed without explicit user trust: $url")
+            val isLoopback = RemoteSourceTrust.isLoopbackHost(host)
+            // When allowLoopbackForTesting is enabled (test mode), HTTP to loopback is permitted
+            // without requiring an explicit trust grant.
+            if (!(allowLoopbackForTesting && isLoopback)) {
+                val isTrustedHttp = trust != null && trust.allowHttpEndpoints && trust.isEndpointOriginTrusted(url)
+                if (!isTrustedHttp) {
+                    return ValidationResult.deny("Only HTTPS URLs are allowed without explicit user trust: $url")
+                }
             }
         }
 
-        if (RemoteSourceTrust.isPrivateOrLocalHost(host) || isPrivateOrReservedIp(host)) {
-            val isTrustedPrivate = trust != null && trust.allowPrivateIpEndpoints && trust.isEndpointOriginTrusted(url)
-            if (!isTrustedPrivate) {
-                return ValidationResult.deny("Access to private/reserved IP addresses is blocked: $host")
+        val isLoopback = RemoteSourceTrust.isLoopbackHost(host)
+        if (!allowLoopbackForTesting || !isLoopback) {
+            if (RemoteSourceTrust.isPrivateOrLocalHost(host) || isPrivateOrReservedIp(host)) {
+                val isTrustedPrivate = trust != null && trust.allowPrivateIpEndpoints && trust.isEndpointOriginTrusted(url)
+                if (!isTrustedPrivate) {
+                    return ValidationResult.deny("Access to private/reserved IP addresses is blocked: $host")
+                }
             }
         }
 

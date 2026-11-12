@@ -67,6 +67,13 @@ data class RemoteSourceTrust(
         return true
     }
 
+    fun isHostTrusted(hostname: String): Boolean {
+        val hostLower = hostname.lowercase()
+        return trustedEndpointOrigins.any { origin ->
+            parseOrigin(origin)?.host.equals(hostLower, ignoreCase = true)
+        }
+    }
+
     data class ParsedOrigin(
         val protocol: String,
         val host: String,

@@ -14,6 +14,7 @@ import okhttp3.OkHttpClient
 class RemoteProviderRuntimeFactory(
     private val okHttpClient: OkHttpClient,
     private val json: Json,
+    private val slugStore: RemoteSlugStore = RemoteSlugStore(),
 ) {
 
     fun createRuntime(
@@ -32,7 +33,7 @@ class RemoteProviderRuntimeFactory(
             return null
         }
 
-        return RemoteProviderRuntime.create(entry, workflows, okHttpClient, json, requestPolicy)
+        return RemoteProviderRuntime.create(entry, workflows, okHttpClient, json, requestPolicy, slugStore)
     }
 
     private fun parseWorkflows(entry: RemoteProviderEntry, config: RemoteProviderConfig): Map<String, WorkflowDefinition> {
