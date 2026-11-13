@@ -16,6 +16,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 class WorkflowRemoteProviderRuntime(
     private val baseRuntime: RemoteProviderRuntime,
@@ -74,8 +76,7 @@ class WorkflowRemoteProviderRuntime(
             variables["animeSlug"] = animeSlug
             variables["animeUrl"] = animeSlug
             variables["slug"] = animeSlug
-            // entry.endpoint ends with "/", animeSlug starts with "/" -> avoid double slash
-            variables["url"] = entry.endpoint.trimEnd('/') + animeSlug
+            resolveUrl(animeSlug)?.let { variables["url"] = it }
         }
 
         val result = executor.execute(
@@ -87,13 +88,13 @@ class WorkflowRemoteProviderRuntime(
 
         return if (result.success) {
             val episodesResult = parseEpisodesResult(result.output, anilistId)
-            // Cache discovered episode slugs
+            // Cache the raw episode href (not the pipeId). First wins: a later episode that parses to
+            // the same number must not overwrite the genuine one.
             episodesResult?.providers?.forEach { providerData ->
-                providerData.sub.forEach { ep ->
-                    slugStore.putEpisodeSlug(entry.id, anilistId, ep.number, ep.pipeId)
-                }
-                providerData.dub.forEach { ep ->
-                    slugStore.putEpisodeSlug(entry.id, anilistId, ep.number, ep.pipeId)
+                val seen = mutableSetOf<Double>()
+                (providerData.sub + providerData.dub).forEach { ep ->
+                    val href = parseRemotePipeId(ep.pipeId)
+                    if (href != null && seen.add(ep.number)) slugStore.putEpisodeSlug(entry.id, anilistId, ep.number, href)
                 }
             }
             episodesResult
@@ -106,27 +107,18 @@ class WorkflowRemoteProviderRuntime(
     suspend fun getSources(anilistId: Int, episodeNumber: Double, category: Category): SourcesResult? {
         val workflow = workflows["sources"] ?: return null
 
-        val episodeUrl = slugStore.getEpisodeSlug(entry.id, anilistId, episodeNumber)
-        val animeSlug = slugStore.getAnimeSlug(entry.id, anilistId)
+        val episode = episodeVariables(slugStore.getEpisodeSlug(entry.id, anilistId, episodeNumber)) ?: run {
+            DiagnosticsLog.event("WorkflowRemoteProviderRuntime getSources: no episode url provider=${entry.id} anilistId=$anilistId episode=$episodeNumber")
+            return null
+        }
 
         val variables = mutableMapOf<String, Any>(
             "anilistId" to anilistId,
             "episodeNumber" to episodeNumber,
             "category" to category.name,
         )
-        if (!episodeUrl.isNullOrBlank()) {
-            variables["episodeUrl"] = episodeUrl
-            variables["episodeSlug"] = episodeUrl
-        }
-        if (!animeSlug.isNullOrBlank()) {
-            variables["animeSlug"] = animeSlug
-            variables["animeUrl"] = animeSlug
-        }
-        if (!animeSlug.isNullOrBlank() || !episodeUrl.isNullOrBlank()) {
-            // Provide a resolvable URL for workflows that use {{url}} (e.g., Anichin/Kuramanime)
-            val slugForUrl = if (!animeSlug.isNullOrBlank()) animeSlug else episodeUrl
-            variables["url"] = entry.endpoint.trimEnd('/') + slugForUrl
-        }
+        variables.putAll(episode)
+        putAnimeVariables(variables, anilistId)
 
         val result = executor.execute(
             workflow,
@@ -143,40 +135,32 @@ class WorkflowRemoteProviderRuntime(
     }
 
     suspend fun getSourcesForPipeId(pipeId: String, anilistId: Int, variant: SourceVariant): SourcesResult? {
-        // pipeId format: remote/{providerId}/{anilistId}/{category}/{episodeSlugOrNumber}
-        val parts = pipeId.split("/")
-        val epIdentifier = if (parts.size >= 5) parts[4] else pipeId
-        val epNumber = epIdentifier.toDoubleOrNull() ?: 1.0
-
+        // pipeId format: remote/{providerId}/{anilistId}/{category}/{episodeHrefOrNumber}; the href may contain '/'
         val workflow = workflows["sources"] ?: return null
 
-        val cachedEpisodeSlug = slugStore.getEpisodeSlug(entry.id, anilistId, epNumber)
-        val effectiveEpisodeUrl = if (!epIdentifier.toDoubleOrNull().toString().equals(epIdentifier)) {
-            epIdentifier
-        } else {
-            cachedEpisodeSlug ?: epIdentifier
+        val raw = parseRemotePipeId(pipeId)
+        val epNumber = raw?.toDoubleOrNull()
+        // A bare number is the legacy form: look the href up in the cache. Anything else is the href itself.
+        val href = if (epNumber != null) slugStore.getEpisodeSlug(entry.id, anilistId, epNumber) else raw
+        val episode = episodeVariables(href) ?: run {
+            DiagnosticsLog.event("WorkflowRemoteProviderRuntime getSourcesForPipeId: no episode url provider=${entry.id} pipeId=$pipeId")
+            return null
         }
-
-        val animeSlug = slugStore.getAnimeSlug(entry.id, anilistId)
 
         val variables = mutableMapOf<String, Any>(
             "pipeId" to pipeId,
             "anilistId" to anilistId,
-            "episodeNumber" to epNumber,
+            "episodeNumber" to (epNumber ?: 1.0),
             "variant" to variant.api,
             "category" to variant.category.name,
-            "episodeUrl" to effectiveEpisodeUrl,
-            "episodeSlug" to effectiveEpisodeUrl,
         )
-        if (!animeSlug.isNullOrBlank()) {
-            variables["animeSlug"] = animeSlug
-            variables["animeUrl"] = animeSlug
-        }
+        variables.putAll(episode)
+        putAnimeVariables(variables, anilistId)
 
         val result = executor.execute(
             workflow,
             variables,
-            "${entry.id}_sources_${anilistId}_$epNumber"
+            "${entry.id}_sources_${anilistId}_${epNumber ?: 1.0}"
         )
 
         return if (result.success) {
@@ -185,6 +169,31 @@ class WorkflowRemoteProviderRuntime(
             DiagnosticsLog.event("WorkflowRemoteProviderRuntime getSourcesForPipeId failed: provider=${entry.id} pipeId=$pipeId error=${result.error}")
             null
         }
+    }
+
+    private fun putAnimeVariables(variables: MutableMap<String, Any>, anilistId: Int) {
+        val animeSlug = slugStore.getAnimeSlug(entry.id, anilistId)
+        if (!animeSlug.isNullOrBlank()) {
+            variables["animeSlug"] = animeSlug
+            variables["animeUrl"] = animeSlug
+        }
+    }
+
+    /** `url`/`episodeUrl` = absolute episode URL, `episodeSlug` = its path without leading/trailing '/'. */
+    private fun episodeVariables(rawHref: String?): Map<String, String>? {
+        val url = rawHref?.let(::resolveUrl) ?: return null
+        return mapOf("url" to url, "episodeUrl" to url, "episodeSlug" to url.toHttpUrl().encodedPath.trim('/'))
+    }
+
+    /** Resolves a relative or absolute href against the endpoint; refuses other hosts (HTML is untrusted). */
+    private fun resolveUrl(raw: String): String? {
+        val base = entry.endpoint.toHttpUrlOrNull() ?: return null
+        val url = base.resolve(raw.trim())
+        if (url == null || url.host.removePrefix("www.") != base.host.removePrefix("www.")) {
+            DiagnosticsLog.event("WorkflowRemoteProviderRuntime refused href: provider=${entry.id} href=$raw")
+            return null
+        }
+        return url.toString()
     }
 
     suspend fun getServers(anilistId: Int, episodeNumber: Double): List<ServerInfo> {
@@ -539,3 +548,11 @@ class WorkflowRemoteProviderRuntime(
         val variant: SourceVariant,
     )
 }
+
+/**
+ * Raw episode href inside `remote/{provider}/{anilistId}/{category}/{href}`. The href may itself
+ * contain `/` (leading, trailing, absolute URL), so only the first four slashes are delimiters.
+ */
+internal fun parseRemotePipeId(pipeId: String): String? =
+    (if (pipeId.startsWith("remote/")) pipeId.split("/", limit = 5).getOrNull(4) else pipeId)
+        ?.takeIf { it.isNotBlank() && it != "/" }
