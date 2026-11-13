@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center px-4 py-2 bg-brand-700 text-white text-sm font-medium rounded-lg shadow-sm hover:bg-brand-900 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center px-4 py-2 bg-white text-slate-700 border border-slate-200 text-sm font-medium rounded-lg shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 transition-colors;
+  }
+
+  .input-field {
+    @apply block w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 transition-colors;
+  }
+
+  .card {
+    @apply bg-white rounded-xl border border-slate-200 shadow-sm p-6;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold uppercase tracking-tighter;
+  }
+
+  .badge-passed {
+    @apply bg-green-100 text-green-800 border border-green-200;
+  }
+
+  .badge-failed {
+    @apply bg-red-100 text-red-800 border border-red-200;
+  }
+
+  .badge-partial {
+    @apply bg-yellow-100 text-yellow-800 border border-yellow-200;
+  }
+
+  .badge-blocked {
+    @apply bg-orange-100 text-orange-800 border border-orange-200;
+  }
+
+  .badge-not-tested {
+    @apply bg-slate-100 text-slate-900 border border-slate-200;
+  }
+
+  /* Focus indicator terlihat jelas untuk navigasi keyboard (WCAG AA 2.4.7) */
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2;
+  }
+
+  /* Application states */
+  .state-empty {
+    @apply text-center py-12 border border-slate-200 rounded-lg bg-white;
+  }
+  .state-loading {
+    @apply text-center py-12;
+  }
+  .state-error {
+    @apply bg-red-50 border border-red-100 rounded-lg p-4 text-sm text-red-700;
+  }
+  .state-success {
+    @apply bg-green-50 border border-green-100 rounded-lg p-4 text-sm text-green-700;
+  }
+  .state-warning {
+    @apply bg-amber-50 border border-amber-100 rounded-lg p-4 text-sm text-amber-700;
+  }
+  .state-disabled {
+    @apply opacity-50 pointer-events-none;
+  }
+}

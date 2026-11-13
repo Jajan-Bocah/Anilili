@@ -1,0 +1,45 @@
+name = "anilili-provider-generator"
+main = "worker/index.js"
+compatibility_date = "2026-11-12"
+
+[vars]
+APP_NAME = "Anilili Provider JSON Generator"
+
+# ─── Cloudflare Access (verifikasi JWT di Worker) ─────────────────────────────────
+# Default FAIL-CLOSED: selama tiga nilai di bawah kosong, Worker membalas 503 untuk
+# semua request /api/*. Isi setelah membuat aplikasi Access untuk route Worker:
+#   ACCESS_CERTS_URL = "https://<team>.cloudflareaccess.com/cdn-cgi/access/certs"
+#   ACCESS_ISSUER    = "https://<team>.cloudflareaccess.com"
+#   ACCESS_AUDIENCE  = "<Application Audience (AUD) tag dari dashboard Access>"
+# Worker memverifikasi signature (JWKS), issuer, audience, expiry, dan alg whitelist
+# pada header Cf-Access-Jwt-Assertion.
+# ACCESS_AUTH_MODE = "disabled" HANYA untuk development lokal; jangan dipakai di produksi.
+ACCESS_CERTS_URL = ""
+ACCESS_ISSUER = ""
+ACCESS_AUDIENCE = ""
+
+# Live Test dinonaktifkan secara default (SECRET_ALLOWED_DOMAINS kosong → 503).
+# Aktifkan dengan: wrangler secret put SECRET_ALLOWED_DOMAINS  (contoh: example.com,anilili.site)
+# CORS: origin frontend yang dikenal (jangan "*"):
+# CORS_ALLOWED_ORIGIN = "https://anilili.pages.dev"
+
+# Workers Static Assets — frontend dari dist/. Worker hanya dijalankan untuk /api/*,
+# sisanya dilayani langsung sebagai aset statis.
+[assets]
+directory = "dist"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[observability]
+enabled = true
+
+# ─── Cloudflare Rate Limiting binding ─────────────────────────────────────────────
+# Worker memanggil env.RATE_LIMIT.limit({ key }). Fail-closed: binding tidak ada → 503.
+# namespace_id dipilih sendiri (bilangan bulat positif, unik per akun).
+# period hanya boleh 10 atau 60 detik.
+# Catatan: counter bersifat per lokasi Cloudflare (bukan global ketat) dan permisif/eventually
+# consistent — ini pembatas penyalahgunaan, bukan kuota presisi.
+[[ratelimits]]
+name = "RATE_LIMIT"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }

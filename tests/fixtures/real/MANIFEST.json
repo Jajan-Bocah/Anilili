@@ -1,0 +1,258 @@
+{
+  "anililiCommit": "8c6230665699978963aa3e77dd791ceaced94219",
+  "files": {
+    "tests/fixtures/real/anichin/search.htm": {
+      "sourcePath": "app/src/test/resources/fixtures/anichin/search.htm",
+      "anililiCommit": "8c6230665699978963aa3e77dd791ceaced94219",
+      "sha256Original": "14cea48b88bb762ce885bb389193f84f91a60b23e80409fd13ee378e1aaf7a29",
+      "sha256Sanitized": "4c8fa2bfdfb3163e6806439d933d9402a3749f574f3cd11c361fdbda27446616",
+      "bytesOriginal": 144527,
+      "bytesSanitized": 113619,
+      "redactions": {
+        "htmlComment": 1,
+        "noscript": 1,
+        "script": 36,
+        "style": 7
+      },
+      "selectorCounts": {
+        ".listupd article.bs a.tip": {
+          "original": 2,
+          "sanitized": 2
+        },
+        ".eplister li a": {
+          "original": 0,
+          "sanitized": 0
+        },
+        ".eplister li .epl-num": {
+          "original": 0,
+          "sanitized": 0
+        },
+        ".eplister li .epl-title": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "select.mirror option": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "select.mirror option[value]": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "a.ep-button[href*=\"/episode/\"]": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "img[src]": {
+          "original": 50,
+          "sanitized": 50
+        },
+        "title": {
+          "original": 1,
+          "sanitized": 1
+        },
+        "[href]": {
+          "original": 388,
+          "sanitized": 388
+        }
+      },
+      "selectorMatchesInsideRemovedNoscript": {
+        "img[src]": 1,
+        "[href]": 1
+      }
+    },
+    "tests/fixtures/real/anichin/series.htm": {
+      "sourcePath": "app/src/test/resources/fixtures/anichin/series.htm",
+      "anililiCommit": "8c6230665699978963aa3e77dd791ceaced94219",
+      "sha256Original": "d2703307fb427ba25030faf5b3a2086e19ce5a4ba7bce9c76755f5bca4c40525",
+      "sha256Sanitized": "d0323464dd6a63f2a5770755ff30f7bdad1a80fc3e0aca467a26970913bd63a0",
+      "bytesOriginal": 206519,
+      "bytesSanitized": 174358,
+      "redactions": {
+        "htmlComment": 1,
+        "noscript": 1,
+        "script": 43,
+        "style": 7
+      },
+      "selectorCounts": {
+        ".listupd article.bs a.tip": {
+          "original": 5,
+          "sanitized": 5
+        },
+        ".eplister li a": {
+          "original": 168,
+          "sanitized": 168
+        },
+        ".eplister li .epl-num": {
+          "original": 168,
+          "sanitized": 168
+        },
+        ".eplister li .epl-title": {
+          "original": 168,
+          "sanitized": 168
+        },
+        "select.mirror option": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "select.mirror option[value]": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "a.ep-button[href*=\"/episode/\"]": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "img[src]": {
+          "original": 55,
+          "sanitized": 55
+        },
+        "title": {
+          "original": 1,
+          "sanitized": 1
+        },
+        "[href]": {
+          "original": 582,
+          "sanitized": 582
+        }
+      },
+      "selectorMatchesInsideRemovedNoscript": {
+        "img[src]": 1,
+        "[href]": 1
+      }
+    },
+    "tests/fixtures/real/anichin/watch.htm": {
+      "sourcePath": "app/src/test/resources/fixtures/anichin/watch.htm",
+      "anililiCommit": "8c6230665699978963aa3e77dd791ceaced94219",
+      "sha256Original": "0e855adcb2b0b86536906169f711cfe0bc9c382c7651df071b53c55191095026",
+      "sha256Sanitized": "8b16427144c8b4b36e7aecebd6ba088ab43fac81c753b2eccb0e1546d5cacd99",
+      "bytesOriginal": 268330,
+      "bytesSanitized": 234533,
+      "redactions": {
+        "eventHandler": 1,
+        "htmlComment": 1,
+        "noscript": 1,
+        "script": 39,
+        "style": 7
+      },
+      "selectorCounts": {
+        ".listupd article.bs a.tip": {
+          "original": 5,
+          "sanitized": 5
+        },
+        ".eplister li a": {
+          "original": 0,
+          "sanitized": 0
+        },
+        ".eplister li .epl-num": {
+          "original": 0,
+          "sanitized": 0
+        },
+        ".eplister li .epl-title": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "select.mirror option": {
+          "original": 12,
+          "sanitized": 12
+        },
+        "select.mirror option[value]": {
+          "original": 12,
+          "sanitized": 12
+        },
+        "a.ep-button[href*=\"/episode/\"]": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "img[src]": {
+          "original": 230,
+          "sanitized": 230
+        },
+        "title": {
+          "original": 1,
+          "sanitized": 1
+        },
+        "[href]": {
+          "original": 608,
+          "sanitized": 608
+        }
+      },
+      "selectorMatchesInsideRemovedNoscript": {
+        "img[src]": 1,
+        "[href]": 1
+      }
+    },
+    "tests/fixtures/real/kuramanime/search.htm": {
+      "sourcePath": "app/src/test/resources/fixtures/kuramanime/search.htm",
+      "anililiCommit": "8c6230665699978963aa3e77dd791ceaced94219",
+      "sha256Original": "d84a153214f96528b4cea4e7bd80fb3273271c6765ee019c9a6ccd3a17acd611",
+      "sha256Sanitized": "1056c41c2e2365ed07beaf40a29ef01adb791e3041f876912dadc49345685369",
+      "bytesOriginal": 125258,
+      "bytesSanitized": 100336,
+      "redactions": {
+        "eventHandler": 7,
+        "htmlComment": 21,
+        "script": 39,
+        "style": 2,
+        "token": 1
+      },
+      "selectorCounts": {
+        ".listupd article.bs a.tip": {
+          "original": 0,
+          "sanitized": 0
+        },
+        ".eplister li a": {
+          "original": 0,
+          "sanitized": 0
+        },
+        ".eplister li .epl-num": {
+          "original": 0,
+          "sanitized": 0
+        },
+        ".eplister li .epl-title": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "select.mirror option": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "select.mirror option[value]": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "a.ep-button[href*=\"/episode/\"]": {
+          "original": 0,
+          "sanitized": 0
+        },
+        "img[src]": {
+          "original": 2,
+          "sanitized": 2
+        },
+        "title": {
+          "original": 1,
+          "sanitized": 1
+        },
+        "[href]": {
+          "original": 193,
+          "sanitized": 193
+        }
+      },
+      "selectorMatchesInsideRemovedNoscript": {}
+    }
+  },
+  "providerConfigs": {
+    "tests/fixtures/real/provider-configs/anichin.json": {
+      "sourcePath": "app/src/main/assets/remote-provider-configs/anichin.json",
+      "anililiCommit": "8c6230665699978963aa3e77dd791ceaced94219",
+      "sha256": "e9b99ef905ca1bc832b3b0393e99271b565e263625a872a67bb0cf64477457e0",
+      "note": "Salinan verbatim (tanpa sanitasi); config resmi engine, bukan hasil generator."
+    },
+    "tests/fixtures/real/provider-configs/kuramanime.json": {
+      "sourcePath": "app/src/main/assets/remote-provider-configs/kuramanime.json",
+      "anililiCommit": "8c6230665699978963aa3e77dd791ceaced94219",
+      "sha256": "db5219206df859bbbf413fa6436478b6c08d2712e0442a8348b340aa0c2393c2",
+      "note": "Salinan verbatim (tanpa sanitasi); config resmi engine, bukan hasil generator."
+    }
+  }
+}
