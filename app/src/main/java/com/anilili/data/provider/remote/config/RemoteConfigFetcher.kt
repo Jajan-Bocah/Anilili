@@ -54,10 +54,11 @@ class RemoteConfigFetcher(
     suspend fun fetchAndUpdate(
         configUrl: String,
         forceRefresh: Boolean = false,
+        sourceId: String,
         trust: RemoteSourceTrust? = null,
     ): FetchResult {
         return withContext(Dispatchers.IO) {
-            val activeTrust = trust ?: store.getTrust()
+            val activeTrust = trust ?: store.getTrust(sourceId)
             val parsedOrigin = RemoteSourceTrust.parseOrigin(configUrl)
                 ?: return@withContext FetchResult.failure("Invalid config URL format: $configUrl")
 
@@ -117,6 +118,18 @@ class RemoteConfigFetcher(
 
             val updateResult = store.updateConfig(config, configUrl, etag, lastModified, trust = activeTrust)
 
+            // Update lastChecked and lastError in SourceEntry
+            val manifest = store.readManifest()
+            val updatedSources = manifest.sources.map { entry ->
+                if (entry.sourceId == sourceId) {
+                    entry.copy(
+                        lastChecked = System.currentTimeMillis(),
+                        lastError = if (updateResult.success) null else updateResult.errors.joinToString("; ")
+                    )
+                } else entry
+            }
+            store.writeManifest(manifest.copy(sources = updatedSources))
+
             if (updateResult.success) {
                 FetchResult.success(
                     isFirstConfig = updateResult.isFirstConfig,
@@ -132,6 +145,7 @@ class RemoteConfigFetcher(
     suspend fun previewConfig(
         configUrl: String,
         trust: RemoteSourceTrust? = null,
+        sourceId: String,
     ): ConfigPreviewResult {
         return withContext(Dispatchers.IO) {
             val parsedOrigin = RemoteSourceTrust.parseOrigin(configUrl)
@@ -144,7 +158,7 @@ class RemoteConfigFetcher(
             val isHttp = parsedOrigin.protocol == "http"
             val isPrivate = parsedOrigin.isPrivateOrLocal
 
-            val activeTrust = trust ?: store.getTrust()
+            val activeTrust = trust ?: store.getTrust(sourceId)
             val isTrusted = if (isHttp) {
                 activeTrust != null && activeTrust.allowHttpConfig && activeTrust.isConfigFetchAllowed(configUrl)
             } else if (isPrivate) {
@@ -215,8 +229,8 @@ class RemoteConfigFetcher(
         }
     }
 
-    suspend fun manualUpdate(configUrl: String, trust: RemoteSourceTrust? = null): FetchResult {
-        return fetchAndUpdate(configUrl, forceRefresh = true, trust = trust)
+    suspend fun manualUpdate(configUrl: String, sourceId: String, trust: RemoteSourceTrust? = null): FetchResult {
+        return fetchAndUpdate(configUrl, forceRefresh = true, sourceId = sourceId, trust = trust)
     }
 
     private fun isHttpsUrl(url: String): Boolean {
@@ -241,26 +255,31 @@ class RemoteConfigUpdateWorker(
 
     override suspend fun doWork(): Result {
         val configUrl = inputData.getString(KEY_CONFIG_URL) ?: return Result.failure()
+        val sourceId = inputData.getString(KEY_SOURCE_ID) ?: return Result.failure()
         val forceRefresh = inputData.getBoolean(KEY_FORCE_REFRESH, false)
 
-        val result = fetcher.fetchAndUpdate(configUrl, forceRefresh)
+        val result = fetcher.fetchAndUpdate(configUrl, forceRefresh, sourceId)
 
         return if (result.success) {
             Result.success()
         } else {
-            DiagnosticsLog.event("RemoteConfigUpdateWorker failed: ${result.error}")
+            DiagnosticsLog.event("RemoteConfigUpdateWorker failed for $sourceId: ${result.error}")
             if (result.isRetryable) Result.retry() else Result.failure()
         }
     }
 
     companion object {
-        const val WORK_NAME = "RemoteProviderConfigUpdate"
+        const val WORK_NAME_PREFIX = "RemoteProviderConfigUpdate_"
         const val KEY_CONFIG_URL = "config_url"
+        const val KEY_SOURCE_ID = "source_id"
         const val KEY_FORCE_REFRESH = "force_refresh"
         const val DEFAULT_INTERVAL_HOURS = 24L
 
+        private fun workName(sourceId: String) = "$WORK_NAME_PREFIX$sourceId"
+
         fun schedulePeriodicUpdate(
             context: Context,
+            sourceId: String,
             configUrl: String,
             intervalHours: Long = DEFAULT_INTERVAL_HOURS,
         ) {
@@ -276,35 +295,54 @@ class RemoteConfigUpdateWorker(
                 .setInputData(
                     androidx.work.Data.Builder()
                         .putString(KEY_CONFIG_URL, configUrl)
+                        .putString(KEY_SOURCE_ID, sourceId)
                         .build()
                 )
                 .build()
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-                WORK_NAME,
+                workName(sourceId),
                 ExistingPeriodicWorkPolicy.KEEP,
                 request,
             )
         }
 
-        fun cancelPeriodicUpdate(context: Context) {
-            WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
+        fun cancelPeriodicUpdate(context: Context, sourceId: String) {
+            WorkManager.getInstance(context).cancelUniqueWork(workName(sourceId))
         }
 
-        fun enqueueManualUpdate(context: Context, configUrl: String) {
+        fun cancelAllPeriodicUpdates(context: Context) {
+            val workManager = WorkManager.getInstance(context)
+            workManager.getWorkInfosByTagLiveData(WORK_NAME_PREFIX).observeForever { infos ->
+                infos.forEach { info ->
+                    workManager.cancelUniqueWork(info.id.toString())
+                }
+            }
+        }
+
+        fun enqueueManualUpdate(context: Context, sourceId: String, configUrl: String) {
             val request = androidx.work.OneTimeWorkRequest.Builder(RemoteConfigUpdateWorker::class.java)
                 .setInputData(
                     androidx.work.Data.Builder()
                         .putString(KEY_CONFIG_URL, configUrl)
+                        .putString(KEY_SOURCE_ID, sourceId)
                         .putBoolean(KEY_FORCE_REFRESH, true)
                         .build()
                 )
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(
-                "${WORK_NAME}_manual",
+                "${workName(sourceId)}_manual",
                 ExistingWorkPolicy.REPLACE,
                 request,
             )
+        }
+
+        fun restoreSchedulesFromSources(context: Context, sources: List<SourceEntry>) {
+            sources.forEach { entry ->
+                if (entry.enabled) {
+                    schedulePeriodicUpdate(context, entry.sourceId, entry.configUrl)
+                }
+            }
         }
     }
 }

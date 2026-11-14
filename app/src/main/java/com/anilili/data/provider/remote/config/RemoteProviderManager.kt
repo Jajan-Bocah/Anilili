@@ -38,19 +38,22 @@ class RemoteProviderManager(
         scope.launch {
             if (configStore.hasConfig()) {
                 registry.refreshFromStore()
+                val sources = configStore.getInstalledSources()
+                RemoteConfigUpdateWorker.restoreSchedulesFromSources(appContext, sources)
                 DiagnosticsLog.event("RemoteProviderManager initialized with existing config")
             }
         }
     }
 
     suspend fun previewCustomSource(configUrl: String, trust: RemoteSourceTrust? = null): ConfigPreviewResult {
-        return fetcher.previewConfig(configUrl, trust)
+        val sourceId = sourceIdFromUrl(configUrl)
+        return fetcher.previewConfig(configUrl, trust, sourceId)
     }
 
     /** Installs a single source. Generates a sourceId from the config URL. */
     suspend fun addCustomSource(configUrl: String, trust: RemoteSourceTrust? = null): AddSourceResult {
         val sourceId = sourceIdFromUrl(configUrl)
-        val config = fetchConfig(configUrl, trust)
+        val config = fetchConfig(configUrl, trust, sourceId)
             ?: return AddSourceResult.failure("Failed to fetch or parse config from $configUrl")
 
         val result = configStore.updateSource(
@@ -61,6 +64,7 @@ class RemoteProviderManager(
         )
         if (result.success) {
             registry.refreshFromStore()
+            scheduleAutomaticUpdates(sourceId, configUrl)
             return AddSourceResult.success(
                 isFirstConfig = result.isFirstConfig,
                 wasRollback = result.wasRollback,
@@ -77,6 +81,7 @@ class RemoteProviderManager(
         if (revokeTrust) {
             configStore.revokeSourceTrust(sourceId)
         }
+        cancelAutomaticUpdates(sourceId)
         val removed = configStore.removeSource(sourceId)
         registry.refreshFromStore()
         return RemoveSourceResult.success(previousConfig = current)
@@ -91,10 +96,11 @@ class RemoteProviderManager(
 
     /** Updates a single installed source by re-fetching its config URL. */
     suspend fun updateSource(sourceId: String): FetchResult {
-        val entry = configStore.getInstalledSources().firstOrNull { it.sourceId == sourceId }
+        val sources = configStore.getInstalledSources()
+        val entry = sources.firstOrNull { it.sourceId == sourceId }
             ?: return FetchResult.failure("Source not found: $sourceId")
         val trust = configStore.getSourceTrust(sourceId)
-        val config = fetchConfig(entry.configUrl, trust)
+        val config = fetchConfig(entry.configUrl, trust, sourceId)
             ?: return FetchResult.failure("Failed to fetch updated config for $sourceId")
 
         val result = configStore.updateSource(
@@ -124,23 +130,28 @@ class RemoteProviderManager(
         return ok
     }
 
-    fun getInstalledSources(): List<SourceEntry> = configStore.getInstalledSources()
+    suspend fun getInstalledSources(): List<SourceEntry> = configStore.getInstalledSources()
 
-    fun getTrust(): RemoteSourceTrust? = configStore.getTrust()
+    /** Returns the trust for a specific source (required for per-source trust). */
+    fun getTrust(sourceId: String): RemoteSourceTrust? = configStore.getTrust(sourceId)
 
     /** Returns the trust for a specific source. */
     fun getSourceTrust(sourceId: String): RemoteSourceTrust? = configStore.getSourceTrust(sourceId)
 
-    fun scheduleAutomaticUpdates(configUrl: String, intervalHours: Long = 24) {
-        RemoteConfigUpdateWorker.schedulePeriodicUpdate(appContext, configUrl, intervalHours)
+    fun scheduleAutomaticUpdates(sourceId: String, configUrl: String, intervalHours: Long = 24) {
+        RemoteConfigUpdateWorker.schedulePeriodicUpdate(appContext, sourceId, configUrl, intervalHours)
     }
 
-    fun cancelAutomaticUpdates() {
-        RemoteConfigUpdateWorker.cancelPeriodicUpdate(appContext)
+    fun cancelAutomaticUpdates(sourceId: String) {
+        RemoteConfigUpdateWorker.cancelPeriodicUpdate(appContext, sourceId)
     }
 
-    fun triggerManualUpdate(configUrl: String) {
-        RemoteConfigUpdateWorker.enqueueManualUpdate(appContext, configUrl)
+    fun cancelAllAutomaticUpdates() {
+        RemoteConfigUpdateWorker.cancelAllPeriodicUpdates(appContext)
+    }
+
+    fun triggerManualUpdate(sourceId: String, configUrl: String) {
+        RemoteConfigUpdateWorker.enqueueManualUpdate(appContext, sourceId, configUrl)
     }
 
     fun shutdown() {
@@ -149,14 +160,14 @@ class RemoteProviderManager(
 
     // ── Private helpers ──────────────────────────────────────────────────
 
-    private suspend fun fetchConfig(configUrl: String, trust: RemoteSourceTrust?): RemoteProviderConfig? {
+    private suspend fun fetchConfig(configUrl: String, trust: RemoteSourceTrust?, sourceId: String): RemoteProviderConfig? {
         return withContext(Dispatchers.IO) {
             try {
                 val parsedOrigin = RemoteSourceTrust.parseOrigin(configUrl)
                     ?: return@withContext null
                 if (parsedOrigin.isLoopback) return@withContext null
 
-                val activeTrust = trust ?: configStore.getTrust()
+                val activeTrust = trust ?: configStore.getTrust(sourceId)
                 val isHttp = parsedOrigin.protocol == "http"
                 val isPrivate = parsedOrigin.isPrivateOrLocal
 

@@ -22,6 +22,13 @@ import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicReference
 import okhttp3.MediaType
 import okhttp3.RequestBody
+import androidx.work.WorkManager
+import androidx.work.PeriodicWorkRequest
+import androidx.work.Constraints
+import androidx.work.NetworkType
+import androidx.work.ExistingPeriodicWorkPolicy
+import java.util.concurrent.TimeUnit
+import com.anilili.data.provider.remote.config.RemoteConfigUpdateWorker
 
 class RemoteProviderConfigStore(
     context: Context,
@@ -59,7 +66,7 @@ class RemoteProviderConfigStore(
     // ── Public API: multi-source ──────────────────────────────────────────
 
     /** Returns all installed source entries (including disabled). */
-    fun getInstalledSources(): List<SourceEntry> {
+    suspend fun getInstalledSources(): List<SourceEntry> {
         val manifest = readManifest()
         return manifest.sources
     }
@@ -157,13 +164,19 @@ class RemoteProviderConfigStore(
 
                 // 5. Update manifest
                 val manifest = readManifest()
+                val previousEntry = manifest.sources.firstOrNull { it.sourceId == sourceId }
                 val entry = SourceEntry(
                     sourceId = sourceId,
                     configUrl = configUrl,
-                    enabled = true,
-                    installedAt = previous?.let { System.currentTimeMillis() } ?: System.currentTimeMillis(),
+                    // Re-fetching must not re-enable a source the user disabled.
+                    enabled = sourceEnabled.get()[sourceId] ?: true,
+                    installedAt = previousEntry?.installedAt ?: System.currentTimeMillis(),
                     lastUpdated = System.currentTimeMillis(),
                     providerIds = config.providers.map { it.id },
+                    autoUpdateEnabled = previousEntry?.autoUpdateEnabled ?: true,
+                    updateIntervalHours = previousEntry?.updateIntervalHours ?: 24,
+                    lastChecked = previousEntry?.lastChecked ?: 0,
+                    lastError = null,
                 )
                 val updatedSources = manifest.sources.filter { it.sourceId != sourceId } + entry
                 writeManifest(manifest.copy(sources = updatedSources))
@@ -274,9 +287,36 @@ class RemoteProviderConfigStore(
                 if (!sourceConfigs.get().containsKey(sourceId)) return@withLock false
                 val updated = sourceEnabled.get().toMutableMap().apply { put(sourceId, enabled) }
                 sourceEnabled.set(updated)
+                // Persist the flag to the manifest so it survives an app restart.
+                val manifest = readManifest()
+                if (manifest.sources.any { it.sourceId == sourceId }) {
+                    val updatedSources = manifest.sources.map { entry ->
+                        if (entry.sourceId == sourceId) entry.copy(enabled = enabled) else entry
+                    }
+                    writeManifest(manifest.copy(sources = updatedSources))
+                }
+                // Also cancel/enable automatic updates
+                if (enabled) {
+                    val entry = manifest.sources.firstOrNull { it.sourceId == sourceId }
+                    if (entry != null && entry.autoUpdateEnabled) {
+                        schedulePeriodicUpdate(sourceId, entry.configUrl, entry.updateIntervalHours)
+                    }
+                } else {
+                    cancelPeriodicUpdate(sourceId)
+                }
                 true
             }
         }
+    }
+
+    /** Schedule periodic update for a source via WorkManager. */
+    fun schedulePeriodicUpdate(sourceId: String, configUrl: String, intervalHours: Long) {
+        RemoteConfigUpdateWorker.schedulePeriodicUpdate(appContext, sourceId, configUrl, intervalHours)
+    }
+
+    /** Cancel periodic update for a source. */
+    fun cancelPeriodicUpdate(sourceId: String) {
+        RemoteConfigUpdateWorker.cancelPeriodicUpdate(appContext, sourceId)
     }
 
     /** Revoke trust for a single source. Adds its origin to the tombstone so rollback cannot restore it. */
@@ -324,7 +364,7 @@ class RemoteProviderConfigStore(
 
     fun getConfigOriginUrl(): String? = configOriginUrlRef.get()
 
-    fun getTrust(): RemoteSourceTrust? = trustRef.get()
+    fun getTrust(sourceId: String): RemoteSourceTrust? = sourceTrusts.get()[sourceId]
 
     /** Returns true if any source is installed. */
     fun hasConfig(): Boolean = sourceConfigs.get().isNotEmpty()
@@ -361,32 +401,40 @@ class RemoteProviderConfigStore(
         return clearConfig()
     }
 
-    // ── Private: disk I/O ─────────────────────────────────────────────────
+    // ── Public: manifest access ────────────────────────────────────────────────
 
-    private fun readManifest(): SourceManifest {
-        if (!manifestFile.isFile) return SourceManifest()
-        return runCatching {
-            FileInputStream(manifestFile).use { input ->
-                json.decodeFromString<SourceManifest>(
-                    SourceManifest.serializer(),
-                    input.readBytes().decodeToString()
-                )
-            }
-        }.onFailure {
-            DiagnosticsLog.throwable("RemoteProviderConfigStore manifest read failed", it)
-        }.getOrDefault(SourceManifest())
-    }
-
-    private suspend fun writeManifest(manifest: SourceManifest) {
-        val temp = File(storeDirectory, ".${MANIFEST_FILE_NAME}.${System.nanoTime()}.tmp")
-        try {
-            writeFile(temp, manifest)
-            atomicReplace(temp, manifestFile)
-        } catch (e: Exception) {
-            temp.delete()
-            throw e
+    /** Reads the current manifest from disk. */
+    suspend fun readManifest(): SourceManifest {
+        return withContext(Dispatchers.IO) {
+            if (!manifestFile.isFile) return@withContext SourceManifest()
+            runCatching {
+                FileInputStream(manifestFile).use { input ->
+                    json.decodeFromString<SourceManifest>(
+                        SourceManifest.serializer(),
+                        input.readBytes().decodeToString()
+                    )
+                }
+            }.onFailure {
+                DiagnosticsLog.throwable("RemoteProviderConfigStore manifest read failed", it)
+            }.getOrDefault(SourceManifest())
         }
     }
+
+    /** Writes the manifest to disk atomically. */
+    suspend fun writeManifest(manifest: SourceManifest) {
+        withContext(Dispatchers.IO) {
+            val temp = File(storeDirectory, ".${MANIFEST_FILE_NAME}.${System.nanoTime()}.tmp")
+            try {
+                writeFile(temp, manifest)
+                atomicReplace(temp, manifestFile)
+            } catch (e: Exception) {
+                DiagnosticsLog.throwable("RemoteProviderConfigStore manifest write failed", e)
+                temp.delete()
+            }
+        }
+    }
+
+    // ── Private: disk I/O ─────────────────────────────────────────────────
 
     private fun readRevokedOrigins(): List<String> {
         if (!revokedOriginsFile.isFile) return emptyList()
@@ -604,6 +652,10 @@ class RemoteProviderConfigStore(
                     installedAt = System.currentTimeMillis(),
                     lastUpdated = System.currentTimeMillis(),
                     providerIds = legacyConfig.config.providers.map { it.id },
+                    autoUpdateEnabled = true,
+                    updateIntervalHours = 24,
+                    lastChecked = 0,
+                    lastError = null,
                 )
                 writeManifest(manifest.copy(sources = listOf(entry)))
                 // Set in-memory state
@@ -691,6 +743,11 @@ data class SourceEntry(
     val installedAt: Long,
     val lastUpdated: Long,
     val providerIds: List<String> = emptyList(),
+    // Auto-update metadata
+    val autoUpdateEnabled: Boolean = true,
+    val updateIntervalHours: Long = 24,
+    val lastChecked: Long = 0,
+    val lastError: String? = null,
 )
 
 data class UpdateResult(

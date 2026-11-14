@@ -183,6 +183,7 @@ class RemoteRequestPolicy(
         fun fromSecurityConfig(
             config: SecurityConfig,
             trust: RemoteSourceTrust? = null,
+            allowLoopbackForTesting: Boolean = false,
         ): RemoteRequestPolicy {
             return RemoteRequestPolicy(
                 allowedDomains = config.allowedDomains.toSet(),
@@ -194,6 +195,7 @@ class RemoteRequestPolicy(
                 allowRedirects = config.allowRedirects,
                 maxRedirects = config.maxRedirects,
                 trust = trust,
+                allowLoopbackForTesting = allowLoopbackForTesting,
             )
         }
     }

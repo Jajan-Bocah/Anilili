@@ -21,10 +21,14 @@ class RemoteProviderRuntimeFactory(
         entry: RemoteProviderEntry,
         config: RemoteProviderConfig,
         trust: RemoteSourceTrust? = null,
+        securityConfig: SecurityConfig? = null,
+        sourceId: String = "",
+        allowLoopbackForTesting: Boolean = false,
     ): WorkflowRemoteProviderRuntime? {
         val requestPolicy = RemoteRequestPolicy.fromSecurityConfig(
-            config = config.security ?: SecurityConfig(),
+            config = securityConfig ?: config.security ?: SecurityConfig(),
             trust = trust,
+            allowLoopbackForTesting = allowLoopbackForTesting,
         )
         val workflows = parseWorkflows(entry, config)
 

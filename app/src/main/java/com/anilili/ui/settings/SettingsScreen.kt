@@ -76,6 +76,7 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -198,6 +199,7 @@ import com.anilili.ui.dialogs.LocalMidnightSettingSpotlight
 import com.anilili.ui.dialogs.MidnightChoicePicker
 import com.anilili.ui.dialogs.MidnightChoiceRow
 import com.anilili.ui.dialogs.MidnightConfirmDialog
+import com.anilili.ui.dialogs.MidnightConnectionStatus
 import com.anilili.ui.dialogs.MidnightDialogFooter
 import com.anilili.ui.dialogs.MidnightDialogHost
 import com.anilili.ui.dialogs.MidnightFilledAction
@@ -4214,16 +4216,23 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
     var testingSource by remember { mutableStateOf<String?>(null) }
     var testResult by remember { mutableStateOf<String?>(null) }
     var showRemoveConfirm by remember { mutableStateOf(false) }
+    var selectedSourceForRemoval by remember { mutableStateOf<String?>(null) }
     var trustConfirmed by remember { mutableStateOf(false) }
     var allowRuntimeEndpoints by remember { mutableStateOf(true) }
     var previewResult by remember { mutableStateOf<com.anilili.data.provider.remote.config.ConfigPreviewResult?>(null) }
+    var showAddForm by remember { mutableStateOf(false) }
+    var selectedSourceForDetail by remember { mutableStateOf<String?>(null) }
+    val installedSources = remember {
+        mutableStateOf(emptyList<com.anilili.data.provider.remote.config.SourceEntry>())
+    }
+    val hasAnyConfig = remember {
+        derivedStateOf { installedSources.value.isNotEmpty() }
+    }
 
-    val currentConfig = remoteProviderManager.configStore.getCurrentConfig()
-    val hasConfig = currentConfig != null
-    val providerCount = currentConfig?.config?.providers?.size ?: 0
-    val configMetadata = currentConfig?.config?.metadata
-    val configUrlDisplay = currentConfig?.originalUrl ?: ""
-    val currentTrust = remoteProviderManager.getTrust()
+    // Load installed sources when dialog opens
+    LaunchedEffect(Unit) {
+        installedSources.value = remoteProviderManager.configStore.getInstalledSources()
+    }
 
     val parsedOrigin = remember(configUrl) {
         if (configUrl.isNotBlank()) com.anilili.data.provider.remote.config.RemoteSourceTrust.parseOrigin(configUrl) else null
@@ -4247,7 +4256,45 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (!hasConfig) {
+            val selectedDetailSource = selectedSourceForDetail?.let { id -> installedSources.value.firstOrNull { it.sourceId == id } }
+            if (selectedDetailSource != null) {
+                // ── Per-source detail view ──────────────────────────────────────
+                SourceDetailCard(
+                    source = selectedDetailSource,
+                    remoteProviderManager = remoteProviderManager,
+                    scope = scope,
+                    testingSource = testingSource,
+                    testResult = testResult,
+                    onTest = { sourceId, url ->
+                        testingSource = sourceId
+                        testResult = null
+                        scope.launch {
+                            try {
+                                val result = remoteProviderManager.fetcher.manualUpdate(url, sourceId)
+                                testResult = if (result.success) "Test passed: ${result.message}" else "Test failed: ${result.error}"
+                            } catch (e: Exception) {
+                                testResult = "Test error: ${e.message}"
+                            } finally {
+                                testingSource = null
+                            }
+                        }
+                    },
+                    onUpdate = { sourceId, url ->
+                        scope.launch {
+                            val result = remoteProviderManager.updateSource(sourceId)
+                            testResult = if (result.success) "Updated: ${result.message}" else "Update failed: ${result.error}"
+                        }
+                    },
+                    onToggleEnabled = { sourceId, enabled ->
+                        scope.launch { remoteProviderManager.setSourceEnabled(sourceId, enabled) }
+                    },
+                    onRemove = { sourceId ->
+                        selectedSourceForRemoval = sourceId
+                        showRemoveConfirm = true
+                    },
+                    onBack = { selectedSourceForDetail = null },
+                )
+            } else if (!hasAnyConfig.value || showAddForm) {
                 if (previewResult == null) {
                     // Add source form
                     Text(
@@ -4401,7 +4448,7 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
 
                     if (!meta?.description.isNullOrBlank()) {
                         Text(
-                            text = "Description: ${meta?.description}",
+                            text = "Description: ${meta.description}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -4427,7 +4474,7 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
                                 Text(
                                     text = "This configuration defines providers pointing to:\n${requestedEndpoints.joinToString("\n") { "• $it" }}",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                                 Row(
                                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
@@ -4486,6 +4533,7 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
                                             configUrl = ""
                                             previewResult = null
                                             trustConfirmed = false
+                                            showAddForm = false
                                         } else {
                                             addError = result.error ?: "Failed to install source"
                                         }
@@ -4509,179 +4557,428 @@ private fun CustomSourcesDialog(onDismiss: () -> Unit) {
                     }
                 }
             } else {
-                // Show current config info
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = "Current config",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
+                // ── Multi-source list view ─────────────────────────────────────
+                Text(
+                    text = "Installed sources (${installedSources.value.size})",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
 
-                    Row(
+                installedSources.value.forEach { source ->
+                    val sourceConfig = remoteProviderManager.configStore.getSourceConfig(source.sourceId)
+                    val sourceTrust = remoteProviderManager.configStore.getSourceTrust(source.sourceId)
+                    val sourceEnabled = remoteProviderManager.configStore.isSourceEnabled(source.sourceId)
+                    val providerIds = sourceConfig?.config?.providers?.map { it.id } ?: emptyList()
+
+                    androidx.compose.material3.Card(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        colors = androidx.compose.material3.CardDefaults.cardColors(
+                            containerColor = if (sourceEnabled) MaterialTheme.colorScheme.surfaceVariant
+                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        ),
                     ) {
-                        Text("URL: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(configUrlDisplay, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, overflow = TextOverflow.Ellipsis)
-                    }
-
-                    // Trust details
-                    if (currentTrust != null) {
                         Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            Text(
-                                text = if (currentTrust.isLocalNetwork) "Trust: Local Network (Trusted)" else "Trust: Cleartext HTTP (Trusted)",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.tertiary,
-                            )
-                            Text(
-                                text = "Config Origin: ${currentTrust.configOrigin}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            if (currentTrust.trustedEndpointOrigins.isNotEmpty()) {
-                                Text(
-                                    text = "Approved Endpoints: ${currentTrust.trustedEndpointOrigins.joinToString()}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = source.sourceId,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = FontWeight.W700,
+                                    )
+                                    Text(
+                                        text = source.configUrl,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                MidnightConnectionStatus(
+                                    text = if (sourceEnabled) "Enabled" else "Disabled",
+                                    connected = sourceEnabled,
                                 )
                             }
-                        }
-                    } else {
-                        Text(
-                            text = "Trust: Public HTTPS (Default)",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
 
-                    if (configMetadata != null) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text("Name: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(configMetadata.name, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
-                        }
+                            MidnightInlineNotice(
+                                text = "Providers: ${if (providerIds.isEmpty()) "none" else providerIds.joinToString(", ")}",
+                                tone = if (providerIds.isEmpty()) MidnightNoticeTone.WARNING else MidnightNoticeTone.SUCCESS,
+                            )
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text("Version: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(configMetadata.version, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
-                        }
+                            if (sourceTrust != null) {
+                                Text(
+                                    text = "Trust: ${if (sourceTrust.isLocalNetwork) "Local Network" else "Cleartext HTTP"} · Origin: ${sourceTrust.configOrigin}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.tertiary,
+                                )
+                            } else {
+                                Text(
+                                    text = "Trust: Public HTTPS (Default)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text("Providers: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("$providerCount", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
-                        }
+                            MidnightSettingSwitchRow(
+                                title = if (sourceEnabled) "Disable source" else "Enable source",
+                                checked = sourceEnabled,
+                                onCheckedChange = { enabled ->
+                                    scope.launch { remoteProviderManager.setSourceEnabled(source.sourceId, enabled) }
+                                },
+                            )
 
-                        if (configMetadata.description.isNotBlank()) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                Text("Description: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(configMetadata.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                    }
-
-                    // Actions
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        // Test source button
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            androidx.compose.material3.OutlinedButton(
-                                onClick = {
-                                    testingSource = "current"
-                                    testResult = null
-                                    scope.launch {
-                                        try {
-                                            val result = remoteProviderManager.fetcher.manualUpdate(configUrlDisplay)
-                                            testResult = if (result.success) "Test passed: ${result.message}" else "Test failed: ${result.error}"
-                                        } catch (e: Exception) {
-                                            testResult = "Test error: ${e.message}"
-                                        } finally {
-                                            testingSource = null
+                                androidx.compose.material3.OutlinedButton(
+                                    onClick = { selectedSourceForDetail = source.sourceId },
+                                ) {
+                                    Text("Details")
+                                }
+                                androidx.compose.material3.OutlinedButton(
+                                    onClick = {
+                                        testingSource = source.sourceId
+                                        testResult = null
+                                        scope.launch {
+                                            try {
+                                                val result = remoteProviderManager.fetcher.manualUpdate(source.configUrl, source.sourceId)
+                                                testResult = if (result.success) "Test passed: ${result.message}" else "Test failed: ${result.error}"
+                                            } catch (e: Exception) {
+                                                testResult = "Test error: ${e.message}"
+                                            } finally {
+                                                testingSource = null
+                                            }
                                         }
+                                    },
+                                    enabled = testingSource == null,
+                                ) {
+                                    if (testingSource == source.sourceId) {
+                                        androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Testing...")
+                                    } else {
+                                        Text("Test")
                                     }
-                                },
-                                enabled = testingSource == null,
-                            ) {
-                                if (testingSource != null) {
-                                    androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(20.dp))
-                                    Spacer(Modifier.width(8.dp))
-                                    Text("Testing...")
-                                } else {
-                                    Text("Test source")
                                 }
                             }
+
                             testResult?.let { result ->
-                                Text(
-                                    text = result,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (result.startsWith("Test passed")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                                )
-                            }
-                        }
-
-                        // Update button
-                        androidx.compose.material3.OutlinedButton(
-                            onClick = {
-                                scope.launch {
-                                    val result = remoteProviderManager.fetcher.manualUpdate(configUrlDisplay)
+                                if (testingSource == source.sourceId || testingSource == null) {
+                                    Text(
+                                        text = result,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (result.startsWith("Test passed") || result.startsWith("Updated")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                    )
                                 }
-                            },
-                        ) {
-                            Text("Check for updates")
-                        }
-
-                        // Remove & Revoke trust button
-                        OutlinedButton(
-                            onClick = {
-                                showRemoveConfirm = true
-                            },
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                contentColor = MaterialTheme.colorScheme.error,
-                            ),
-                        ) {
-                            Text("Revoke trust & Remove source", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error)
+                            }
                         }
                     }
+                }
+
+                // Add another source button — does not remove existing ones.
+                androidx.compose.material3.OutlinedButton(
+                    onClick = {
+                        showAddForm = true
+                        previewResult = null
+                        addError = null
+                        configUrl = ""
+                        trustConfirmed = false
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("+ Add another source")
+                }
+
+                if (addError != null) {
+                    Text(addError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
 
-        if (showRemoveConfirm) {
+        if (showRemoveConfirm && selectedSourceForRemoval != null) {
             MidnightConfirmDialog(
                 kicker = "Custom sources",
                 title = "Revoke trust & remove source?",
-                body = "This will remove the custom source configuration, revoke all network permissions, and clear stored trust.",
+                body = "This will remove '${selectedSourceForRemoval}' configuration, revoke all network permissions, and clear stored trust.",
                 confirmText = "Revoke & Remove",
                 onConfirm = {
                     showRemoveConfirm = false
                     scope.launch {
-                        remoteProviderManager.removeCustomSource(revokeTrust = true)
+                        selectedSourceForRemoval?.let { remoteProviderManager.removeCustomSource(it, revokeTrust = true) }
+                        selectedSourceForRemoval = null
+                        selectedSourceForDetail = null
                     }
                 },
                 onDismiss = { showRemoveConfirm = false },
             )
+        }
+    }
+}
+
+@Composable
+private fun SourceDetailCard(
+    source: com.anilili.data.provider.remote.config.SourceEntry,
+    remoteProviderManager: com.anilili.data.provider.remote.config.RemoteProviderManager,
+    scope: kotlinx.coroutines.CoroutineScope,
+    testingSource: String?,
+    testResult: String?,
+    onTest: (String, String) -> Unit,
+    onUpdate: (String, String) -> Unit,
+    onToggleEnabled: (String, Boolean) -> Unit,
+    onRemove: (String) -> Unit,
+    onBack: () -> Unit,
+) {
+    val sourceConfig = remoteProviderManager.configStore.getSourceConfig(source.sourceId)
+    val sourceTrust = remoteProviderManager.configStore.getSourceTrust(source.sourceId)
+    val sourceEnabled = remoteProviderManager.configStore.isSourceEnabled(source.sourceId)
+    val configMetadata = sourceConfig?.config?.metadata
+    val providerCount = sourceConfig?.config?.providers?.size ?: 0
+    val configUrlDisplay = sourceConfig?.originalUrl ?: source.configUrl
+
+    val autoUpdateEnabled = source.autoUpdateEnabled
+    val updateIntervalHours = source.updateIntervalHours
+    val lastChecked = source.lastChecked
+    val lastError = source.lastError
+    val lastUpdated = source.lastUpdated
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = "Source: ${source.sourceId}",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("URL: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(configUrlDisplay, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, overflow = TextOverflow.Ellipsis)
+        }
+
+        if (sourceTrust != null) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = if (sourceTrust.isLocalNetwork) "Trust: Local Network (Trusted)" else "Trust: Cleartext HTTP (Trusted)",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+                Text(
+                    text = "Config Origin: ${sourceTrust.configOrigin}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (sourceTrust.trustedEndpointOrigins.isNotEmpty()) {
+                    Text(
+                        text = "Approved Endpoints: ${sourceTrust.trustedEndpointOrigins.joinToString()}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        } else {
+            Text(
+                text = "Trust: Public HTTPS (Default)",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+
+        if (configMetadata != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Name: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(configMetadata.name, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Version: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(configMetadata.version, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Providers: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("$providerCount", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+            }
+
+            if (configMetadata.description.isNotBlank()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Description: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(configMetadata.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+
+        // Per-source provider list
+        sourceConfig?.config?.providers?.forEach { provider ->
+            MidnightInlineNotice(
+                text = "Provider: ${provider.id} (${provider.name}) · endpoint: ${provider.endpoint}",
+                tone = MidnightNoticeTone.INFO,
+            )
+        }
+
+        // Auto-update settings
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "Auto‑update",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+
+            MidnightSettingSwitchRow(
+                title = "Auto‑update this source",
+                checked = autoUpdateEnabled && sourceEnabled,
+                onCheckedChange = { enabled ->
+                    if (enabled) {
+                        // Enable auto-update: schedule with current interval
+                        scope.launch {
+                            remoteProviderManager.configStore.schedulePeriodicUpdate(source.sourceId, configUrlDisplay, updateIntervalHours)
+                        }
+                    } else {
+                        // Disable auto-update
+                        scope.launch {
+                            remoteProviderManager.configStore.cancelPeriodicUpdate(source.sourceId)
+                        }
+                    }
+                    // Persist the setting
+                    scope.launch {
+                        val manifest = remoteProviderManager.configStore.readManifest()
+                        val updatedSources = manifest.sources.map { entry ->
+                            if (entry.sourceId == source.sourceId) entry.copy(autoUpdateEnabled = enabled) else entry
+                        }
+                        remoteProviderManager.configStore.writeManifest(manifest.copy(sources = updatedSources))
+                    }
+                },
+                enabled = sourceEnabled,
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Interval: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("${updateIntervalHours}h", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Last checked: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    if (lastChecked > 0) java.text.DateFormat.getDateTimeInstance().format(java.util.Date(lastChecked))
+                    else "Never",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Last updated: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    if (lastUpdated > 0) java.text.DateFormat.getDateTimeInstance().format(java.util.Date(lastUpdated))
+                    else "Never",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            lastError?.let { error ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Last error: ", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                androidx.compose.material3.OutlinedButton(
+                    onClick = { onTest(source.sourceId, configUrlDisplay) },
+                    enabled = testingSource == null,
+                ) {
+                    if (testingSource == source.sourceId) {
+                        androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Testing...")
+                    } else {
+                        Text("Test source")
+                    }
+                }
+                testResult?.let { result ->
+                    Text(
+                        text = result,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (result.startsWith("Test passed") || result.startsWith("Updated")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+
+            androidx.compose.material3.OutlinedButton(
+                onClick = { onUpdate(source.sourceId, configUrlDisplay) },
+            ) {
+                Text("Check for updates")
+            }
+
+            MidnightSettingSwitchRow(
+                title = if (sourceEnabled) "Disable source" else "Enable source",
+                checked = sourceEnabled,
+                onCheckedChange = { enabled -> onToggleEnabled(source.sourceId, enabled) },
+            )
+
+            OutlinedButton(
+                onClick = { onRemove(source.sourceId) },
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error,
+                ),
+            ) {
+                Text("Revoke trust & Remove source", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error)
+            }
         }
     }
 }

@@ -400,6 +400,11 @@ class WorkflowRemoteProviderRuntime(
 
         // Detect mirror dropdown pattern: workflow output has both "streams" (mirror URLs) and "servers" (mirror labels)
         val isMirrorDropdown = output is Map<*, *> && output.containsKey("streams") && output.containsKey("servers")
+        // requiresWebView=true means the provider's sources workflow yields iframe/embed pages, not
+        // direct media files. Plain string URLs from such a workflow must be typed "embed" regardless
+        // of whether the URL path happens to contain the word "embed" — that word-sniff is unreliable
+        // for URLs like https://player.example/watch/123.
+        val providerRequiresWebView = resolvedCapabilities.requiresWebView
 
         val streamsRaw = when (output) {
             is Map<*, *> -> output["streams"] ?: output["sources"] ?: output["video"]
@@ -420,8 +425,11 @@ class WorkflowRemoteProviderRuntime(
                 is Map<*, *> -> {
                     val url = (item["url"] ?: item["file"] ?: item["src"])?.toString() ?: return@forEach
                     val typeRaw = item["type"]?.toString()?.lowercase() ?: ""
-                    val isIframe = typeRaw == "embed" || url.contains("embed") || item["isEmbed"] == true
                     val isHls = url.contains(".m3u8") || typeRaw == "hls"
+                    // Explicit type wins; then provenance (provider requires WebView or mirror
+                    // dropdown); URL substring is last-resort only when nothing else says embed.
+                    val isIframe = typeRaw == "embed" || item["isEmbed"] == true ||
+                        (!isHls && (providerRequiresWebView || isMirrorDropdown || url.contains("embed")))
                     val type = if (isHls) "hls" else if (isIframe) "embed" else "mp4"
 
                     val quality = item["quality"]?.toString() ?: item["label"]?.toString()
@@ -447,9 +455,14 @@ class WorkflowRemoteProviderRuntime(
                 is JsonObject -> {
                     val url = (item["url"] ?: item["file"] ?: item["src"])?.let { if (it is JsonPrimitive) it.content else it.toString() } ?: return@forEach
                     val typeRaw = (item["type"] as? JsonPrimitive)?.content?.lowercase() ?: ""
-                    val isIframe = typeRaw == "embed" || url.contains("embed")
                     val isHls = url.contains(".m3u8") || typeRaw == "hls"
-                    val type = if (isHls) "hls" else if (isIframe) "embed" else "mp4"
+                    // Also reject DASH (.mpd) and known media file extensions from being typed embed,
+                    // even when requiresWebView=true. These are native streams, not iframe pages.
+                    val isDash = url.contains(".mpd") || typeRaw == "dash" || typeRaw == "mpd"
+                    val isMediaFile = listOf("mp4", "m4v", "webm", "mkv", "mov").any { url.lowercase().endsWith("." + it) }
+                    val isIframe = typeRaw == "embed" ||
+                        (!isHls && !isDash && !isMediaFile && (providerRequiresWebView || isMirrorDropdown || url.contains("embed")))
+                    val type = if (isHls) "hls" else if (isDash) "dash" else if (isIframe) "embed" else "mp4"
 
                     val quality = (item["quality"] as? JsonPrimitive)?.content
                     val referer = (item["referer"] as? JsonPrimitive)?.content ?: entry.endpoint
@@ -468,13 +481,16 @@ class WorkflowRemoteProviderRuntime(
                     )
                 }
                 is String -> {
-                    // Plain URL string from select attribute (e.g., mirror option value)
+                    // Plain URL string from select attribute (e.g., mirror option value or iframe src)
                     val url = item
                     if (url.isBlank()) return@forEach
-                    // If from mirror dropdown (select.mirror option), treat as embed iframe
-                    val isIframe = isMirrorDropdown || url.contains("embed")
                     val isHls = url.contains(".m3u8")
-                    val type = if (isHls) "hls" else if (isIframe) "embed" else "mp4"
+                    val isDash = url.contains(".mpd")
+                    val isMediaFile = listOf("mp4", "m4v", "webm", "mkv", "mov").any { url.lowercase().endsWith("." + it) }
+                    // providerRequiresWebView is the reliable signal; isMirrorDropdown and URL
+                    // substring are retained as fallbacks for configs that predate the flag.
+                    val isIframe = !isHls && !isDash && !isMediaFile && (providerRequiresWebView || isMirrorDropdown || url.contains("embed"))
+                    val type = if (isHls) "hls" else if (isDash) "dash" else if (isIframe) "embed" else "mp4"
 
                     streamList.add(
                         StreamItem(

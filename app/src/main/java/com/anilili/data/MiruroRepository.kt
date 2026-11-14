@@ -19,6 +19,10 @@ import com.anilili.data.model.HomeCollections
 import com.anilili.data.model.ScheduleDayCount
 import com.anilili.data.model.SourcesResult
 import com.anilili.data.model.SourceVariant
+import com.anilili.data.model.MediaTitle
+import com.anilili.data.model.CoverImage
+import com.anilili.data.model.FuzzyDate
+import com.anilili.data.model.StudioConnection
 import com.anilili.data.cache.AppCache
 import com.anilili.data.remote.AiringSeason
 import com.anilili.data.remote.searchHanimeCatalogue
@@ -40,6 +44,7 @@ import com.anilili.data.library.WatchedTitles
 import com.anilili.data.model.WatchedFilter
 import com.anilili.data.provider.registry.UnifiedProviderRegistry
 import com.anilili.data.provider.registry.UnifiedSourceType
+import com.anilili.data.provider.remote.runtime.WorkflowRemoteProviderRuntime
 import com.anilili.data.remote.AniListClient
 import com.anilili.data.remote.AniZipClient
 import com.anilili.data.remote.AniSkipClient
@@ -1139,10 +1144,24 @@ class MiruroRepository(
                 items = withOnePaceResult(filters.query, withHanimeResults(filters.query, padded.items, page), page),
             )
         }
+
+        // Also search remote providers that support search workflows
+        // Only on first page and when there's an actual query (not just browsing)
+        val withRemoteSearch = if (page == 1 && filters.query.isNotBlank() && filters.copy(hideWatched = WatchedFilter.OFF).activeCount == 0) {
+            val remoteResults = searchRemoteProviders(filters.query)
+            if (remoteResults.isNotEmpty()) {
+                answered.copy(items = (answered.items + remoteResults).distinctBy { it.id })
+            } else {
+                answered
+            }
+        } else {
+            answered
+        }
+
         // AniList already left the account's titles out; this catches what it could not know — the
         // bundled and device-side results, and titles played through on this device.
-        if (filters.hideWatched == WatchedFilter.OFF) return answered
-        return answered.copy(items = answered.items.filterNot { WatchedTitles.hides(it, filters.hideWatched) })
+        if (filters.hideWatched == WatchedFilter.OFF) return withRemoteSearch
+        return withRemoteSearch.copy(items = withRemoteSearch.items.filterNot { WatchedTitles.hides(it, filters.hideWatched) })
     }
 
     /**
@@ -1237,6 +1256,59 @@ class MiruroRepository(
         }
 
     suspend fun searchStudios(query: String): List<StudioNode> = aniList.searchStudios(query)
+
+    /**
+     * Search across remote providers that support search workflows.
+     * Returns a list of Media objects converted from remote provider search results.
+     */
+    private suspend fun searchRemoteProviders(query: String): List<Media> {
+        if (query.isBlank()) return emptyList()
+
+        val runtimes = providerRegistry.getWorkflowRuntimes()
+        val searchableRuntimes = runtimes.filter { it.resolvedCapabilities.supportsSearch }
+
+        if (searchableRuntimes.isEmpty()) return emptyList()
+
+        val allResults = mutableListOf<WorkflowRemoteProviderRuntime.SearchResult>()
+
+        for (rt in searchableRuntimes) {
+            try {
+                val results = rt.search(query)
+                if (results.isNotEmpty()) {
+                    DiagnosticsLog.event("Remote search: provider=${rt.entry.id} query=$query hits=${results.size}")
+                    allResults.addAll(results)
+                }
+            } catch (e: Exception) {
+                DiagnosticsLog.throwable("Remote search failed: provider=${rt.entry.id} query=$query", e)
+            }
+        }
+
+        if (allResults.isEmpty()) return emptyList()
+
+        // Convert SearchResult to Media objects
+        return allResults.mapNotNull { result ->
+            try {
+                // Try to get AniList ID for the result, or generate a unique negative ID
+                val anilistId = if (result.anilistId > 0) result.anilistId else -result.slugOrUrl.hashCode()
+                Media(
+                    id = anilistId,
+                    title = MediaTitle(english = result.title, romaji = result.title),
+                    coverImage = CoverImage(large = result.image, extraLarge = result.image),
+                    format = result.format,
+                    seasonYear = result.year,
+                    isAdult = false,
+                    genres = emptyList(),
+                    tags = emptyList(),
+                    studios = StudioConnection(),
+                    startDate = result.year?.let { FuzzyDate(year = it) },
+                    countryOfOrigin = null,
+                )
+            } catch (e: Exception) {
+                DiagnosticsLog.throwable("Failed to convert remote search result to Media", e)
+                null
+            }
+        }.distinctBy { it.id }
+    }
 
     /**
      * Wide pictures of [anilistId]'s show for the background picker, best first: TMDB's (text-free
