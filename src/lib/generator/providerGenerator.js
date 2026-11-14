@@ -88,10 +88,7 @@ export function generateProviderJson(project, options = {}) {
     name: project.name || 'Unknown Provider',
     endpoint: project.endpoint,
     source: project.source || 'generic_html',
-    capabilities: {
-      ...DEFAULT_CAPABILITIES,
-      ...(project.capabilities || {}),
-    },
+    capabilities: inferCapabilities(project.workflows, project.capabilities),
     category: project.category || 'general',
     languages: project.languages || [],
     subtitleVariants: project.subtitleVariants || [],
@@ -157,6 +154,30 @@ export function generateProviderJson(project, options = {}) {
     ...(project.security || {}),
   }
 
+  // Peringatan: domain embed (src iframe dari sampel stream) berbeda dari allowedDomains.
+  // allowedDomains hanya mengontrol outbound HTTP dari workflow steps, bukan playback iframe.
+  // Jika user menyebut domain embed di inferredRules, tampilkan info agar mereka sadar perbedaannya.
+  if (project.inferredRules && project.inferredRules.stream) {
+    const embedHosts = []
+    for (const rule of project.inferredRules.stream) {
+      if (rule.id === 'stream-iframe' && rule.meta && Array.isArray(rule.meta.sample)) {
+        for (const src of rule.meta.sample) {
+          const eHost = hostnameOf(src)
+          if (eHost && eHost !== h && !security.allowedDomains.includes(eHost)) {
+            embedHosts.push(eHost)
+          }
+        }
+      }
+    }
+    if (embedHosts.length > 0) {
+      // shortcut: hanya domain unik; peringatan ini informatif, bukan error.
+      const unique = [...new Set(embedHosts)]
+      warnings.push(
+        `Domain embed iframe (${unique.join(', ')}) tidak ada di allowedDomains — ini normal karena allowedDomains hanya mengontrol HTTP workflow steps, bukan playback iframe. Tambahkan secara manual jika workflow Anda melakukan HTTP request ke domain tersebut.`
+      )
+    }
+  }
+
   const update = project.update
     ? {
       mode: project.update.mode || 'auto',
@@ -211,6 +232,48 @@ function cleanParams(params) {
     out[k] = v
   })
   return out
+}
+
+/**
+ * Inferensi capabilities dari workflows yang tersedia + override eksplisit pengguna.
+ * Hanya mengaktifkan flag yang dapat dibuktikan dari workflows; tidak menyentuh flag lain.
+ * Override eksplisit (project.capabilities) selalu menang.
+ *
+ * @param {object|undefined} workflows - project.workflows
+ * @param {object|undefined} userOverrides - project.capabilities (override eksplisit pengguna)
+ * @returns {object} capabilities siap pakai
+ */
+export function inferCapabilities(workflows, userOverrides) {
+  const inferred = { ...DEFAULT_CAPABILITIES }
+  // supportsSearch: aktif jika ada workflow 'search' dengan minimal satu step.
+  if (workflows && workflows.search && Array.isArray(workflows.search.steps) && workflows.search.steps.length > 0) {
+    inferred.supportsSearch = true
+  }
+
+  // requiresWebView: infer ketika sources workflow menggunakan iframe (stream-iframe rule aktif)
+  // dan iframe src BUKAN direct media (m3u8/mpd/mp4/webm).
+  // Bukti: workflow sources dipilih dari rule 'stream-iframe' (bukan 'stream-source').
+  // Jika user sudah set override (true/false), hormati override.
+  if (workflows && workflows.sources && Array.isArray(workflows.sources.steps) && workflows.sources.steps.length > 0) {
+    // Cari step select yang memetakan ke 'streams' - rule asalnya bisa dilacak dari saveAs
+    const streamsStep = workflows.sources.steps.find(
+      (s) => s.op === 'select' && workflows.sources.output?.mapping?.streams === s.saveAs
+    )
+    if (streamsStep) {
+      // stream-iframe rule menghasilkan selector untuk iframe[src], stream-source untuk video/source[src]
+      // Cek apakah selector mengandung 'iframe' (bukti kuat iframe-based)
+      const selector = streamsStep.params?.selector || ''
+      const sampleUrl = streamsStep.params?.sample?.[0] || ''
+      const isIframeSelector = /iframe/i.test(selector)
+      const isDirectMedia = /\.(m3u8|mpd|mp4|webm)(\?|#|$)/i.test(sampleUrl)
+      if (isIframeSelector && !isDirectMedia) {
+        inferred.requiresWebView = true
+      }
+    }
+  }
+
+  // User override selalu menang (termasuk false eksplisit)
+  return { ...inferred, ...(userOverrides || {}) }
 }
 
 /**
