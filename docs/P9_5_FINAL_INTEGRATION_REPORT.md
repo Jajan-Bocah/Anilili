@@ -286,4 +286,6 @@ BUILD SUCCESSFUL
 
 ---
 
-*Generated on 2026-11-14 via P9.5 validation run on branch `feature/hybrid-remote-provider-engine`*
+*Generated on 2026-11-14 via P9.5 validation run on branch `feature/hybrid-remote-provider-engine`*  
+**Commit**: `8246e1f` — "feat(remote-provider): stabilize multi-source runtime and automatic updates"  
+**Pushed**: `origin/feature/hybrid-remote-provider-engine` → `8246e1f` ✅

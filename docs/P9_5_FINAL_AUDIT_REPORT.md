@@ -230,9 +230,10 @@ feat(remote-provider): stabilize multi-source runtime and automatic updates
 - INTEGRATION_PASSED — DEVICE_PLAYBACK_PENDING
 ```
 
-### Expected Commit SHA
+### Commit SHA
 
-To be recorded after `git commit` and `git push origin feature/hybrid-remote-provider-engine`.
+**Local Commit**: `8246e1f` — "feat(remote-provider): stabilize multi-source runtime and automatic updates"  
+**Remote Branch**: `origin/feature/hybrid-remote-provider-engine` → `8246e1f` ✅ Verified
 
 ---
 
@@ -265,7 +266,7 @@ To be recorded after `git commit` and `git push origin feature/hybrid-remote-pro
 | No secrets in changes | ✅ PASS |
 | Commit & push | ⏳ PENDING |
 
-**Overall**: **AUDIT PASSED — READY FOR COMMIT**
+**Overall**: **AUDIT PASSED — COMMITTED & PUSHED**
 
 **Blocker for P9.6**: Device playback validation (requires Android device/emulator with live endpoints).
 
